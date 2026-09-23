@@ -42,8 +42,17 @@ only when a milestone requires them.
 
 ## Current status
 
-**M13: Blast radius foundation** is complete. TrailWeaver now has deliberately separate
-provider-neutral representations and analysis:
+**M14: Deterministic investigation guidance** is complete. `InvestigationAdvisor`
+produces immutable, priority-ordered recommendations from normalized incident signals
+and an optional blast-radius result. Current guidance covers console login without MFA,
+access-key creation, AdministratorAccess assignment, stopped CloudTrail logging, and
+potentially reachable known assets. Similar recommendations are deduplicated, wording
+remains cautious, and the advisor performs no remediation, AWS, network, AI, workflow,
+or persistence operations. An optional risk assessment is accepted for pipeline
+composition, but current fixed recommendation priorities do not depend on its score.
+
+The underlying M13 blast-radius foundation keeps provider-neutral representations and
+analysis deliberately separate:
 
 - `AttackGraph` represents relationships observed in suspicious incident activity.
 - `CloudContext` represents assets and permission facts known to exist in the cloud
