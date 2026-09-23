@@ -42,12 +42,12 @@ only when a milestone requires them.
 
 ## Current status
 
-**M6: Initial AWS detection pack** is complete. TrailWeaver now detects successful
-console logins without MFA, attachment of the AWS managed AdministratorAccess policy,
-IAM access-key creation, and CloudTrail logging being stopped. The pack is an explicit
-tuple of rules consumed by the stateless detection engine. Correlation, incidents, risk
-scoring, persistence, APIs, dashboards, infrastructure, and AWS SDK integration have
-not been implemented.
+**M8: Incident model and incident creation** is complete. TrailWeaver can package the
+initial AWS account-compromise correlation into a high-severity investigation object
+that retains its correlation evidence and exposes derived activity times, a concise
+chronological timeline, and the normalized primary actor. Incident creation remains
+explicit and stateless. Numeric risk scoring, persistence, APIs, dashboards,
+infrastructure, and AWS SDK integration have not been implemented.
 
 For CloudTrail events, the parser reports `failure` when `errorCode` is present and
 `success` otherwise. Response fields do not independently determine the outcome. Events
