@@ -42,12 +42,12 @@ only when a milestone requires them.
 
 ## Current status
 
-**M8: Incident model and incident creation** is complete. TrailWeaver can package the
-initial AWS account-compromise correlation into a high-severity investigation object
-that retains its correlation evidence and exposes derived activity times, a concise
-chronological timeline, and the normalized primary actor. Incident creation remains
-explicit and stateless. Numeric risk scoring, persistence, APIs, dashboards,
-infrastructure, and AWS SDK integration have not been implemented.
+**M11: Attack graph foundation** is complete. TrailWeaver can now derive an immutable,
+provider-neutral graph of identities, source IPs, roles, and resources from normalized
+incident evidence. Node and edge identifiers are deterministic, graph ordering follows
+signal chronology, and missing entities are never fabricated from raw events. Graph
+traversal, attack-path scoring, blast-radius analysis, persistence, visualization, and
+APIs have not been implemented.
 
 For CloudTrail events, the parser reports `failure` when `errorCode` is present and
 `success` otherwise. Response fields do not independently determine the outcome. Events
