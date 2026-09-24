@@ -1,0 +1,11 @@
+{
+  "variant": "Timeline-dominant",
+  "sourceImage": ".impeccable/mocks/m16-investigation-dashboard/timeline-dominant.png",
+  "prompt": "Use case: precise-object-edit\nAsset type: correction pass on a high-fidelity desktop UI mockup.\nImage 1 is the edit target.\nChange only these details:\n1. In the segmented navigation, remove the standalone pill labeled “Soon”. Keep “Graph · M17” as one inactive pill between “ATT&CK” and “Blast Radius”, and close the gap naturally.\n2. In the Investigation Guidance column, correct the priority labels to match the M15 product truth: “Verify login origin” = Medium; “Review new access key activity” = Medium; “Validate AdministratorAccess assignment” = High; “Review potentially reachable resources” = Medium.\nPreserve every other pixel-level design decision: layout, dimensions, hierarchy, copy, dark timeline, lime evidence spine, typography, colors, icons, spacing, borders, and all other text. Do not redesign, add content, or change the visual system.",
+  "referenceImages": [
+    ".impeccable/references/dashboard-reference-1.webp",
+    ".impeccable/references/dashboard-reference-2.png",
+    ".impeccable/references/dashboard-reference-3.png"
+  ],
+  "approved": true
+}

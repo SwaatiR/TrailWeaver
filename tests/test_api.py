@@ -118,14 +118,35 @@ class _ApiClient:
     def __init__(self, application: FastAPI) -> None:
         self._application = application
 
-    def get(self, path: str) -> httpx.Response:
+    def get(
+        self,
+        path: str,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> httpx.Response:
         async def request() -> httpx.Response:
             transport = httpx.ASGITransport(app=self._application)
             async with httpx.AsyncClient(
                 transport=transport,
                 base_url="http://testserver",
             ) as client:
-                return await client.get(path)
+                return await client.get(path, headers=headers)
+
+        return run(request())
+
+    def options(
+        self,
+        path: str,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> httpx.Response:
+        async def request() -> httpx.Response:
+            transport = httpx.ASGITransport(app=self._application)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://testserver",
+            ) as client:
+                return await client.options(path, headers=headers)
 
         return run(request())
 
@@ -172,6 +193,81 @@ def test_health_returns_ok() -> None:
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_default_cors_allows_local_vite_origin() -> None:
+    response = _client().get(
+        "/health",
+        headers={"Origin": "http://localhost:5173"},
+    )
+
+    assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+
+
+def test_cors_does_not_allow_unconfigured_origin() -> None:
+    response = _client().get(
+        "/health",
+        headers={"Origin": "https://untrusted.example"},
+    )
+
+    assert "access-control-allow-origin" not in response.headers
+
+
+def test_cors_origins_can_be_injected_explicitly() -> None:
+    client = _ApiClient(create_app(cors_origins=("https://dashboard.example",)))
+
+    response = client.get(
+        "/health",
+        headers={"Origin": "https://dashboard.example"},
+    )
+
+    assert response.headers["access-control-allow-origin"] == "https://dashboard.example"
+
+
+def test_cors_origins_can_be_configured_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "TRAILWEAVER_CORS_ORIGINS",
+        "https://one.example, https://two.example,https://one.example",
+    )
+    client = _ApiClient(create_app())
+
+    first_response = client.get("/health", headers={"Origin": "https://one.example"})
+    second_response = client.get("/health", headers={"Origin": "https://two.example"})
+
+    assert first_response.headers["access-control-allow-origin"] == "https://one.example"
+    assert second_response.headers["access-control-allow-origin"] == "https://two.example"
+
+
+def test_cors_preflight_allows_configured_frontend_get_request() -> None:
+    response = _client().options(
+        "/api/v1/incidents",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "Accept",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+    assert "GET" in response.headers["access-control-allow-methods"]
+    assert "Accept" in response.headers["access-control-allow-headers"]
+
+
+def test_wildcard_cors_origin_is_rejected() -> None:
+    with pytest.raises(ValueError, match="explicit origins"):
+        create_app(cors_origins=("*",))
+
+
+def test_wildcard_cors_origin_from_environment_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRAILWEAVER_CORS_ORIGINS", "*")
+
+    with pytest.raises(ValueError, match="explicit origins"):
+        create_app()
 
 
 def test_empty_repository_returns_empty_incident_list() -> None:

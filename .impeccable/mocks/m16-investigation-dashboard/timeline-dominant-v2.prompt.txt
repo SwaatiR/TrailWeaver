@@ -1,0 +1,7 @@
+Use case: precise-object-edit
+Asset type: correction pass on a high-fidelity desktop UI mockup.
+Image 1 is the edit target.
+Change only these details:
+1. In the segmented navigation, remove the standalone pill labeled “Soon”. Keep “Graph · M17” as one inactive pill between “ATT&CK” and “Blast Radius”, and close the gap naturally.
+2. In the Investigation Guidance column, correct the priority labels to match the M15 product truth: “Verify login origin” = Medium; “Review new access key activity” = Medium; “Validate AdministratorAccess assignment” = High; “Review potentially reachable resources” = Medium.
+Preserve every other pixel-level design decision: layout, dimensions, hierarchy, copy, dark timeline, lime evidence spine, typography, colors, icons, spacing, borders, and all other text. Do not redesign, add content, or change the visual system.

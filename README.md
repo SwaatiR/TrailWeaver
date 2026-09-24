@@ -42,10 +42,21 @@ only when a milestone requires them.
 
 ## Current status
 
-**M15: API foundation** is complete. A small FastAPI adapter exposes existing incidents
-and deterministic investigation analyses as JSON. The application factory accepts an
-in-memory incident repository and optional `CloudContext`; no persistence, live AWS
-access, authentication, background work, or frontend is included.
+**M16: Investigation dashboard** is complete. A React and TypeScript dashboard consumes
+the M15 FastAPI endpoints and presents real incident data as a timeline-dominant analyst
+workspace. It includes incident selection, deterministic risk factors, observed MITRE
+ATT&CK mappings, investigation guidance, and carefully qualified blast-radius context.
+Loading, empty, unavailable, zero-result, and panel-level API error states are explicit.
+
+The dashboard never ships fallback incident or analysis fixtures. Its incident titles,
+actors, timestamps, signals, risk factors, ATT&CK techniques, guidance, and reachable
+assets all come from the configured API. The default development API still starts with
+an empty in-memory incident source, so an embedding application must inject incidents
+and optional `CloudContext` to populate the dashboard.
+
+M16 does not add persistence, live AWS access, authentication, or background work. The
+Graph destination is deliberately disabled for M17; M16 does not render attack replay
+or an interactive attack graph.
 
 The underlying M13 blast-radius foundation keeps provider-neutral representations and
 analysis deliberately separate:
@@ -127,10 +138,55 @@ pytest
 ruff check .
 ```
 
-Run the local development API with:
+Run the local development API from the repository root with:
 
 ```bash
 uvicorn trailweaver.api.app:app --reload
+```
+
+This normal entry point intentionally starts with an empty incident repository. For
+local dashboard development and presentations, start the explicit M16.1 demo entry
+point instead:
+
+```bash
+uvicorn trailweaver.api.demo:app --reload
+```
+
+Demo mode constructs one deterministic AWS account-compromise scenario through the real
+detection, correlation, incident, risk, MITRE ATT&CK, blast-radius, and investigation
+guidance components. It includes five known demo assets across storage, compute,
+database, and secret categories. Reachability is potential reachability over that loaded
+demo context; it does not claim any asset was accessed. Demo mode is local
+development/presentation support only: it adds no persistence or AWS access and is never
+enabled by the normal application entry point.
+
+In a second terminal, start the dashboard with the existing frontend dependencies:
+
+```bash
+cd frontend
+npm run dev
+```
+
+The frontend uses `http://localhost:8000` by default. To point it at another API, copy
+`frontend/.env.example` to `frontend/.env` and set:
+
+```dotenv
+VITE_TRAILWEAVER_API_URL=http://localhost:8000
+```
+
+The API allows `http://localhost:5173` by default. Configure additional explicit
+frontend origins as a comma-separated list; wildcard origins are rejected:
+
+```bash
+TRAILWEAVER_CORS_ORIGINS=https://dashboard.example,https://analyst.example \
+  uvicorn trailweaver.api.app:app --reload
+```
+
+Build the production frontend bundle with:
+
+```bash
+cd frontend
+npm run build
 ```
 
 The API currently provides:
@@ -147,3 +203,14 @@ The API currently provides:
 The default development application starts with an empty in-memory incident source.
 Applications embedding TrailWeaver can inject existing `Incident` objects and a known
 cloud context through `create_app`.
+
+## Dashboard behavior and limits
+
+- Incident analyses load independently so one failed endpoint does not erase successful
+  timeline, risk, ATT&CK, blast-radius, or guidance data from the other panels.
+- “Cloud context unavailable” means blast-radius analysis could not run. “No known
+  reachable assets identified” means context was loaded and analysis completed with a
+  valid zero result. Neither state is evidence that no real AWS resources are reachable.
+- Reachability describes potential access over loaded, known assets; it never represents
+  observed access. ATT&CK mappings describe observed behavior and are not proof of intent.
+- The dashboard does not expose raw CloudTrail payloads.

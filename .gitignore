@@ -68,3 +68,11 @@ crash.*.log
 # Logs
 *.log
 logs/
+
+# Frontend dependencies / local build
+frontend/node_modules/
+frontend/.env
+
+# Local agent tooling
+.agents/
+.codex/

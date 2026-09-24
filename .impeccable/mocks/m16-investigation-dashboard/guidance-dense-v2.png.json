@@ -1,0 +1,11 @@
+{
+  "variant": "Guidance-dense",
+  "sourceImage": ".impeccable/mocks/m16-investigation-dashboard/guidance-dense.png",
+  "prompt": "Use case: text-localization\nAsset type: correction pass on a high-fidelity desktop UI mockup.\nImage 1 is the edit target.\nChange only the four priority labels in the Investigation Guidance panel to match M15 product truth: “Verify login origin” = Medium; “Review new access key activity” = Medium; “Validate AdministratorAccess assignment” = High; “Review potentially reachable resources” = Medium.\nPreserve every other pixel-level design decision: layout, dimensions, hierarchy, copy, large dark guidance workbench, timeline, risk ledger, colors, icons, spacing, borders, and all other text. Do not redesign or add content.",
+  "referenceImages": [
+    ".impeccable/references/dashboard-reference-1.webp",
+    ".impeccable/references/dashboard-reference-2.png",
+    ".impeccable/references/dashboard-reference-3.png"
+  ],
+  "approved": false
+}

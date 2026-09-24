@@ -1,6 +1,10 @@
 """FastAPI application factory for TrailWeaver investigation results."""
 
+import os
+from collections.abc import Iterable
+
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
 from trailweaver.api.schemas import (
     BlastRadiusAnalysisResponse,
@@ -25,6 +29,23 @@ from trailweaver.cloud_context import CloudContext
 _NO_CLOUD_CONTEXT_REASON = (
     "Blast-radius analysis is unavailable because no cloud context is loaded."
 )
+_DEFAULT_FRONTEND_ORIGIN = "http://localhost:5173"
+_CORS_ORIGINS_ENV = "TRAILWEAVER_CORS_ORIGINS"
+
+
+def _cors_origins(configured: Iterable[str] | None) -> list[str]:
+    """Resolve explicit or environment-provided frontend origins safely."""
+
+    if configured is None:
+        environment_value = os.getenv(_CORS_ORIGINS_ENV, _DEFAULT_FRONTEND_ORIGIN)
+        candidates = environment_value.split(",")
+    else:
+        candidates = list(configured)
+
+    origins = list(dict.fromkeys(origin.strip() for origin in candidates if origin.strip()))
+    if "*" in origins:
+        raise ValueError("TRAILWEAVER_CORS_ORIGINS must list explicit origins, not '*'")
+    return origins
 
 
 def create_app(
@@ -32,6 +53,7 @@ def create_app(
     repository: IncidentRepository | None = None,
     cloud_context: CloudContext | None = None,
     service: IncidentAnalysisService | None = None,
+    cors_origins: Iterable[str] | None = None,
 ) -> FastAPI:
     """Create a testable API with explicitly injected data or application services."""
 
@@ -47,6 +69,13 @@ def create_app(
         )
     )
     application = FastAPI(title="TrailWeaver API", version="1.0.0")
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins(cors_origins),
+        allow_credentials=False,
+        allow_methods=["GET"],
+        allow_headers=["Accept", "Content-Type"],
+    )
 
     def incident_not_found(error: IncidentNotFoundError) -> HTTPException:
         return HTTPException(status_code=404, detail=f"Incident {error.args[0]!r} not found")

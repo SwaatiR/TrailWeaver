@@ -1,0 +1,5 @@
+Use case: text-localization
+Asset type: correction pass on a high-fidelity desktop UI mockup.
+Image 1 is the edit target.
+Change only the four priority labels in the Recommended Guidance column to match M15 product truth: “Verify login origin” = Medium; “Review new access key activity” = Medium; “Validate AdministratorAccess assignment” = High; “Review potentially reachable resources” = Medium.
+Preserve every other pixel-level design decision: layout, dimensions, hierarchy, copy, risk ledger, timeline, colors, icons, spacing, borders, and all other text. Do not redesign or add content.
