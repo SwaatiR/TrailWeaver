@@ -42,14 +42,10 @@ only when a milestone requires them.
 
 ## Current status
 
-**M14: Deterministic investigation guidance** is complete. `InvestigationAdvisor`
-produces immutable, priority-ordered recommendations from normalized incident signals
-and an optional blast-radius result. Current guidance covers console login without MFA,
-access-key creation, AdministratorAccess assignment, stopped CloudTrail logging, and
-potentially reachable known assets. Similar recommendations are deduplicated, wording
-remains cautious, and the advisor performs no remediation, AWS, network, AI, workflow,
-or persistence operations. An optional risk assessment is accepted for pipeline
-composition, but current fixed recommendation priorities do not depend on its score.
+**M15: API foundation** is complete. A small FastAPI adapter exposes existing incidents
+and deterministic investigation analyses as JSON. The application factory accepts an
+in-memory incident repository and optional `CloudContext`; no persistence, live AWS
+access, authentication, background work, or frontend is included.
 
 The underlying M13 blast-radius foundation keeps provider-neutral representations and
 analysis deliberately separate:
@@ -130,3 +126,24 @@ Run the project checks with:
 pytest
 ruff check .
 ```
+
+Run the local development API with:
+
+```bash
+uvicorn trailweaver.api.app:app --reload
+```
+
+The API currently provides:
+
+- `GET /health`
+- `GET /api/v1/incidents`
+- `GET /api/v1/incidents/{incident_id}`
+- `GET /api/v1/incidents/{incident_id}/risk`
+- `GET /api/v1/incidents/{incident_id}/mitre`
+- `GET /api/v1/incidents/{incident_id}/graph`
+- `GET /api/v1/incidents/{incident_id}/blast-radius`
+- `GET /api/v1/incidents/{incident_id}/guidance`
+
+The default development application starts with an empty in-memory incident source.
+Applications embedding TrailWeaver can inject existing `Incident` objects and a known
+cloud context through `create_app`.
