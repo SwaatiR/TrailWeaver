@@ -1,5 +1,6 @@
 import type {
   BlastRadiusResponse,
+  GraphResponse,
   GuidanceResponse,
   HealthResponse,
   IncidentDetail,
@@ -78,6 +79,8 @@ export const trailWeaverApi = {
       incidentPath(incidentId, "/blast-radius"),
       signal,
     ),
+  getGraph: (incidentId: string, signal?: AbortSignal) =>
+    getJson<GraphResponse>(incidentPath(incidentId, "/graph"), signal),
   getGuidance: (incidentId: string, signal?: AbortSignal) =>
     getJson<GuidanceResponse>(incidentPath(incidentId, "/guidance"), signal),
 };

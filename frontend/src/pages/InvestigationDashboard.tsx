@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { ApiError, apiBaseUrl, trailWeaverApi } from "../api/client";
+import { AttackGraphView } from "../components/AttackGraphView";
 import { Icon, type IconName } from "../components/Icon";
 import { PanelError, PanelSkeleton } from "../components/StatusViews";
 import type {
   BlastRadiusResponse,
+  GraphResponse,
   GuidanceResponse,
   IncidentDetail,
   IncidentSummary,
@@ -188,6 +190,8 @@ export function InvestigationDashboard() {
   const [mitre, setMitre] = useState<Loadable<MitreResponse>>(idle());
   const [blastRadius, setBlastRadius] = useState<Loadable<BlastRadiusResponse>>(idle());
   const [guidance, setGuidance] = useState<Loadable<GuidanceResponse>>(idle());
+  const [graph, setGraph] = useState<Loadable<GraphResponse>>(idle());
+  const [activeView, setActiveView] = useState<"overview" | "graph">("overview");
   const [backendStatus, setBackendStatus] = useState<BackendStatus>("checking");
   const [listReload, setListReload] = useState(0);
   const [detailReload, setDetailReload] = useState(0);
@@ -195,6 +199,7 @@ export function InvestigationDashboard() {
   const [mitreReload, setMitreReload] = useState(0);
   const [blastReload, setBlastReload] = useState(0);
   const [guidanceReload, setGuidanceReload] = useState(0);
+  const [graphReload, setGraphReload] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -336,6 +341,27 @@ export function InvestigationDashboard() {
     return () => controller.abort();
   }, [guidanceReload, selectedIncidentId]);
 
+  useEffect(() => {
+    if (!selectedIncidentId) {
+      setGraph(idle());
+      return;
+    }
+
+    const controller = new AbortController();
+    setGraph(loading());
+
+    trailWeaverApi
+      .getGraph(selectedIncidentId, controller.signal)
+      .then((data) => setGraph({ status: "success", data }))
+      .catch((error: unknown) => {
+        if (!(error instanceof Error && error.name === "AbortError")) {
+          setGraph({ status: "error", message: errorMessage(error) });
+        }
+      });
+
+    return () => controller.abort();
+  }, [graphReload, selectedIncidentId]);
+
   const selectedSummary = useMemo(() => {
     if (incidents.status !== "success") return undefined;
     return incidents.data.find((item) => item.incident_id === selectedIncidentId);
@@ -362,6 +388,15 @@ export function InvestigationDashboard() {
     }
     return [...counts.entries()].sort(([left], [right]) => left.localeCompare(right));
   }, [blastRadius]);
+
+  const returnToOverview = (hash: string) => {
+    setActiveView("overview");
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        document.querySelector(hash)?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    });
+  };
 
   if (incidents.status === "loading") {
     return (
@@ -497,6 +532,95 @@ export function InvestigationDashboard() {
         ) : null}
 
         {selectedIncidentId ? (
+          activeView === "graph" ? (
+            <div className="investigation-flow">
+              <section
+                className="investigation-section incident-section"
+                id="overview"
+                aria-labelledby="incident-title"
+                tabIndex={-1}
+              >
+                <header className="incident-header">
+                  <p className="incident-header__lead">Investigating</p>
+                  <h1 id="incident-title">
+                    {detail.status === "success" ? detail.data.title : selectedSummary?.title ?? "Incident details"}
+                  </h1>
+                  <div className="incident-metadata">
+                    <span><Icon name="incident" />{selectedIncidentId}</span>
+                    <span>
+                      <Icon name="identity" />
+                      {detail.status === "success"
+                        ? actorLabel(detail.data)
+                        : detail.status === "loading"
+                          ? "Actor loading"
+                          : "Actor unavailable"}
+                    </span>
+                    <span>
+                      <Icon name="signal" />
+                      {detail.status === "success"
+                        ? `${formatDateTime(detail.data.started_at)} – ${formatDateTime(detail.data.ended_at)}`
+                        : detail.status === "loading"
+                          ? "Time range loading"
+                          : "Time range unavailable"}
+                    </span>
+                  </div>
+                </header>
+
+                <nav className="section-nav" aria-label="Investigation sections">
+                  <button type="button" onClick={() => returnToOverview("#overview")}>Incident</button>
+                  <button type="button" onClick={() => returnToOverview("#timeline")}>Timeline</button>
+                  <button type="button" onClick={() => returnToOverview("#analysis")}>Risk + ATT&amp;CK</button>
+                  <button type="button" disabled aria-current="page" className="section-nav__active">
+                    Graph
+                  </button>
+                  <button type="button" onClick={() => returnToOverview("#blast")}>Potential impact</button>
+                  <button type="button" onClick={() => returnToOverview("#guidance")}>Guidance</button>
+                </nav>
+              </section>
+
+              <section
+                className="investigation-section graph-section"
+                id="graph"
+                aria-labelledby="graph-title"
+                tabIndex={-1}
+              >
+                <SectionHeading
+                  id="graph-title"
+                  title="Attack graph"
+                  description="Observed relationships from incident evidence. Timestamps and signal references are preserved so the sequence can be replayed later. Potential reachability lives under Potential impact — never in this graph."
+                />
+                {graph.status === "loading" ? (
+                  <div className="graph-workspace graph-workspace--state" role="status" aria-label="Loading attack graph" aria-busy="true" aria-live="polite">
+                    <PanelSkeleton rows={5} />
+                  </div>
+                ) : null}
+                {graph.status === "error" ? (
+                  <div className="graph-workspace graph-workspace--state">
+                    <PanelError
+                      title="Attack graph unavailable"
+                      message={graph.message}
+                      onRetry={() => setGraphReload((value) => value + 1)}
+                    />
+                  </div>
+                ) : null}
+                {graph.status === "success" && graph.data.nodes.length === 0 ? (
+                  <div className="graph-workspace graph-workspace--state">
+                    <div className="dark-empty">
+                      <Icon name="attack" />
+                      <p>No observed relationships were reconstructed for this incident. Nothing was invented to fill the gap.</p>
+                    </div>
+                  </div>
+                ) : null}
+                {graph.status === "success" && graph.data.nodes.length > 0 ? (
+                  <AttackGraphView
+                    key={selectedIncidentId}
+                    graph={graph.data}
+                    timeline={sortedTimeline}
+                  />
+                ) : null}
+              </section>
+            </div>
+          ) : (
           <>
             <div className="investigation-flow">
               <section
@@ -581,8 +705,12 @@ export function InvestigationDashboard() {
                   <a href="#overview">Incident</a>
                   <a href="#timeline">Timeline</a>
                   <a href="#analysis">Risk + ATT&amp;CK</a>
-                  <button type="button" disabled aria-label="Graph, planned for milestone 17">
-                    Graph <span>M17</span>
+                  <button
+                    type="button"
+                    onClick={() => setActiveView("graph")}
+                    aria-label="Open the observed attack graph investigation view"
+                  >
+                    Graph
                   </button>
                   <a href="#blast">Potential impact</a>
                   <a href="#guidance">Guidance</a>
@@ -818,6 +946,7 @@ export function InvestigationDashboard() {
               </section>
             </div>
           </>
+          )
         ) : null}
       </main>
     </div>

@@ -54,9 +54,32 @@ assets all come from the configured API. The default development API still start
 an empty in-memory incident source, so an embedding application must inject incidents
 and optional `CloudContext` to populate the dashboard.
 
-M16 does not add persistence, live AWS access, authentication, or background work. The
-Graph destination is deliberately disabled for M17; M16 does not render attack replay
-or an interactive attack graph.
+M16 does not add persistence, live AWS access, authentication, or background work. M16
+leaves the Graph destination disabled and renders no attack replay.
+
+**M17: Interactive attack graph visualization** is complete. The Graph destination is
+now an active investigation view within the selected incident. It renders the
+`GET /api/v1/incidents/{incident_id}/graph` response directly — no graph is rebuilt in
+the browser — with pan, zoom, fit-to-view, reset, type-distinguished nodes, readable
+relationship labels, and a node/edge inspector. Analysts move between Overview and
+Graph without losing incident selection, and the deterministic initial layout places
+the same graph identically on every load.
+
+Graph semantics are observed relationships only: who performed the activity, where it
+originated, which identities, roles, and resources appear in the incident evidence,
+how those entities connect, which signal produced each relationship, and when each
+relationship was observed. Selecting a node shows only data returned by the backend
+(type, label, provider, and available account/region/ARN context). Selecting an edge
+shows its canonical relationship, observed timestamp, and signal reference, linked to
+the matching timeline entry by timestamp so the analyst can see why the edge exists.
+Timestamps and signal references are preserved for chronological replay, but M17
+implements no playback.
+
+The attack graph must not be confused with blast radius. The graph contains entities
+and relationships observed in the incident; blast radius estimates potentially
+reachable known assets from explicit permission grants in the loaded cloud context.
+Reachable assets are never added to the graph, and no edge implies access beyond what
+the evidence supports. Attack replay remains future work (M18).
 
 The underlying M13 blast-radius foundation keeps provider-neutral representations and
 analysis deliberately separate:

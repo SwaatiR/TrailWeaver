@@ -123,3 +123,25 @@ export interface GuidanceResponse {
   recommendations: Recommendation[];
   summary: string;
 }
+
+export interface GraphNode {
+  node_id: string;
+  node_type: string;
+  label: string;
+  provider: string;
+  metadata: Record<string, JsonValue>;
+}
+
+export interface GraphEdge {
+  edge_id: string;
+  source_node_id: string;
+  target_node_id: string;
+  relationship: string;
+  timestamp: string;
+  signal_id: string;
+}
+
+export interface GraphResponse {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
