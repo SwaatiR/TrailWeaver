@@ -288,6 +288,49 @@ directory and schema when explicitly constructed. The demo application remains
 isolated and in-memory. M19 adds persistence only; it does not add CloudTrail
 ingestion, upload endpoints, or a public incident-write API.
 
+### M20: Real CloudTrail file ingestion
+
+TrailWeaver accepts standard AWS CloudTrail JSON exports with a strict top-level
+`{"Records": [...]}` envelope. JSON arrays and other arbitrary JSON shapes are not
+treated as exports. Text, UTF-8 bytes, already-decoded documents, and individual files
+can use the same ingestion semantics through `ingest_cloudtrail_json`,
+`ingest_cloudtrail_document`, and `ingest_cloudtrail_file`.
+
+Each object in `Records` is passed to the existing `parse_cloudtrail_event` parser;
+ingestion does not duplicate AWS normalization rules. A bad individual record produces
+a structured, index-addressed issue while other records continue. Results report total,
+accepted, failed, and duplicate counts alongside an immutable tuple of normalized events.
+An empty `Records` array is a valid zero-event result.
+
+Within one ingestion operation, the first successfully parsed event with a given
+non-empty `event_id` wins. Later records with that ID are reported as duplicates rather
+than parser failures. Events without IDs are retained and are not falsely deduplicated.
+This is deliberately not cross-file or database-backed deduplication. Accepted events
+remain in source order, including when timestamps are non-chronological or records in
+between fail.
+
+```python
+from trailweaver.cloudtrail_ingestion import ingest_cloudtrail_file
+
+result = ingest_cloudtrail_file("export.json", source_label="analyst-upload-42")
+print(result.total_records, result.accepted_records)
+for issue in result.issues:
+    print(issue.record_index, issue.code, issue.event_id)
+```
+
+Raw text, bytes, and files have a configurable 10 MiB default size limit. Files are
+opened read-only, decoded strictly as UTF-8, and given basename-only provenance unless
+the caller supplies a logical label. No separate record-count limit is imposed in M20:
+the byte boundary already caps raw inputs, and transports that provide pre-decoded JSON
+must enforce their own body limit before decoding. Provenance stays on the ingestion
+result rather than entering provider-neutral `NormalizedEvent` objects.
+
+The parser's existing `raw_event` preservation remains unchanged inside accepted
+normalized events. Diagnostics do not copy raw records, the investigation API does not
+expose them, and M19 incident persistence still does not store them. M20 stops after
+normalization: it does not run detection or correlation, create incidents, persist
+ingestion results, expose an upload endpoint, or connect to live AWS services.
+
 ## Dashboard behavior and limits
 
 - Incident analyses load independently so one failed endpoint does not erase successful

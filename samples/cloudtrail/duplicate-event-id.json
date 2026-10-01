@@ -1,0 +1,20 @@
+{
+  "Records": [
+    {
+      "eventVersion": "1.11",
+      "eventTime": "2026-09-23T12:00:00Z",
+      "eventSource": "iam.amazonaws.com",
+      "eventName": "CreateAccessKey",
+      "eventID": "77777777-7777-4777-8777-777777777777",
+      "requestParameters": {"userName": "alice"}
+    },
+    {
+      "eventVersion": "1.11",
+      "eventTime": "2026-09-23T12:05:00Z",
+      "eventSource": "iam.amazonaws.com",
+      "eventName": "DeleteAccessKey",
+      "eventID": "77777777-7777-4777-8777-777777777777",
+      "requestParameters": {"userName": "alice"}
+    }
+  ]
+}

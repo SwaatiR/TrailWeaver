@@ -1,0 +1,28 @@
+{
+  "Records": [
+    {
+      "eventVersion": "1.11",
+      "eventTime": "2026-09-23T11:00:00Z",
+      "eventSource": "signin.amazonaws.com",
+      "eventName": "ConsoleLogin",
+      "eventID": "44444444-4444-4444-8444-444444444444",
+      "sourceIPAddress": "203.0.113.10",
+      "additionalEventData": {"MFAUsed": "No"}
+    },
+    "not-a-cloudtrail-record",
+    {
+      "eventVersion": "1.11",
+      "eventTime": "2026-09-23T11:01:00Z",
+      "eventSource": "iam.amazonaws.com",
+      "eventID": "55555555-5555-4555-8555-555555555555"
+    },
+    {
+      "eventVersion": "1.11",
+      "eventTime": "2026-09-23T10:59:00Z",
+      "eventSource": "cloudtrail.amazonaws.com",
+      "eventName": "StopLogging",
+      "eventID": "66666666-6666-4666-8666-666666666666",
+      "requestParameters": {"name": "fictional-audit-trail"}
+    }
+  ]
+}
