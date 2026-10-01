@@ -483,6 +483,19 @@ This is a local two-container packaging setup. The API remains a single SQLite-b
 instance, and local Compose does not provide durable storage outside the named volume's
 lifecycle or configure an AWS deployment.
 
+### M25: Continuous integration
+
+GitHub Actions runs the repository's quality gates on pull requests, pushes to `main`
+and milestone branches, and manual dispatches. The backend job tests supported Python
+3.11 and 3.12 environments, checks installed dependency consistency, runs the complete
+pytest suite, and runs Ruff. A separate frontend job installs the exact npm lockfile
+with `npm ci` and creates a production build. The container job independently builds
+both production images.
+
+The workflow grants only read access to repository contents. It does not request AWS
+credentials, publish images, or deploy infrastructure. Deployment remains deliberately
+separate until an explicitly configured AWS environment and release policy exist.
+
 ## Dashboard behavior and limits
 
 - Incident analyses load independently so one failed endpoint does not erase successful
