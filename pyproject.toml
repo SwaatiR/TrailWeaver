@@ -9,6 +9,7 @@ description = "AWS cloud security detection and incident reconstruction platform
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "boto3>=1.35,<2",
     "fastapi>=0.115",
     "uvicorn>=0.30",
 ]

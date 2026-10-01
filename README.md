@@ -388,6 +388,29 @@ It adds no POST/upload endpoint, frontend upload flow, live AWS access, backgrou
 source-event persistence, or cloud-context discovery. `CloudContext` remains separately
 injected into the existing read/analysis service when blast-radius analysis is desired.
 
+### M22: AWS-native CloudTrail ingestion from S3
+
+`S3CloudTrailAdapter` retrieves one explicitly configured S3 object through boto3 and
+feeds its bytes into the same M20 ingestion and M21 investigation pipeline. It supports
+plain JSON and gzip-compressed CloudTrail exports, with independent compressed and
+decompressed size limits. Invalid gzip, access denial, missing objects, and other AWS
+client failures are reported through focused sanitized exceptions.
+
+The adapter uses boto3's normal credential provider chain. It never accepts or stores
+access keys itself. Callers may inject an S3-compatible client for testing, or use
+`S3CloudTrailAdapter.from_boto3(region_name=...)` in a runtime with an AWS profile,
+environment-based credentials, or preferably an IAM workload role.
+
+Bucket, object key, ETag, and version ID are source provenance—not event, signal,
+correlation, or incident identity. The default logical source label is the S3 URI, and
+callers may supply a less revealing label. M22 does not make reprocessing idempotent;
+the M21 random identity behavior remains unchanged.
+
+Explicit prefix listing is available and handles S3 pagination, but requires a non-empty
+prefix and only returns metadata. It never automatically ingests every listed object.
+M22 adds no bucket discovery, live polling, queues, event notifications, processed-file
+tracking, or changes to CloudTrail source data.
+
 ## Dashboard behavior and limits
 
 - Incident analyses load independently so one failed endpoint does not erase successful
