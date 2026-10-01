@@ -467,7 +467,7 @@ docker compose up --build
 Open `http://localhost:8080`. SQLite lives at `/data/incidents.sqlite3` on the named
 `incidents` volume, outside the image's writable layer. To keep that data, retain the
 volume when replacing containers; `docker compose down -v` deletes it. The API image
-runs as an unprivileged user and has a `/health` container check. The dashboard image
+runs as an unprivileged user and has a `/ready` container check. The dashboard image
 has a local Nginx health check and proxies API traffic to the internal service.
 
 Runtime Python dependencies are pinned in `requirements-runtime.lock`, and the
@@ -524,6 +524,41 @@ brief downtime. Operators supply existing VPC/subnets, an ACM certificate, DNS, 
 existing CloudTrail bucket/prefix, and immutable image tags. No live deployment or
 image publication is performed by CI. The safe operational sequence is documented in
 `docs/aws-deployment.md`.
+
+### M28: Operations and observability
+
+TrailWeaver emits one JSON object per application log line. Investigation logs identify
+the safe logical source and stage counts (records, accepted, failed, duplicates,
+signals, correlations, incidents, and persisted incidents). S3 and persistence failures
+log a stable event and exception type, not AWS response bodies, SQL, credentials, or
+CloudTrail evidence. API request logs contain method, route template, status, and
+duration only—never query strings or request bodies. ECS sends container stdout/stderr
+to the configured CloudWatch log group; normal platform/ALB metrics are sufficient for
+the current scale, so no separate metrics server is included. Routine liveness and
+readiness probes are omitted from request logs to avoid operational noise.
+
+`GET /health` is a cheap process-liveness endpoint. `GET /ready` performs a lightweight
+SQLite connection and schema check without loading incident evidence. Container/task
+health uses readiness so an unavailable EFS/SQLite dependency is visible to the
+runtime. Neither endpoint calls S3 or another live AWS API. Repository failures exposed
+through HTTP return a sanitized `503`, while unexpected analysis failures continue to
+propagate. API responses include basic anti-sniffing/framing/referrer headers, incident
+responses are marked `no-store`, and the dashboard adds a restrictive content security
+policy.
+
+Operational configuration remains in explicit CLI flags and `TRAILWEAVER_` environment
+variables. Log levels and ports are validated, CORS accepts only explicit HTTP(S)
+origins without credentials, paths, queries, or wildcard origins, and AWS authentication
+uses the normal provider chain locally or the ECS task role in AWS. Raw CloudTrail
+events remain in-memory parser evidence only; logs, SQLite, and API responses do not
+contain `raw_event`.
+
+Back up `/data/incidents.sqlite3` consistently before infrastructure changes and test
+restoration. EFS durability is not a substitute for application-level backup, and
+SQLite remains a single-instance/single-writer design for portfolio-scale operation.
+Repeated source analysis remains non-idempotent because signal, correlation, and
+incident IDs are generated per execution; no file/ETag processing ledger is implied.
+The final CI matrix also formats and validates Terraform with its backend disabled.
 
 ## Dashboard behavior and limits
 

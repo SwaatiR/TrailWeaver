@@ -1,5 +1,6 @@
 """Synchronous application orchestration for CloudTrail investigations."""
 
+import logging
 from dataclasses import dataclass
 from os import PathLike
 
@@ -15,8 +16,11 @@ from trailweaver.correlation_rules import AWS_CORRELATION_RULES
 from trailweaver.detection import DetectionEngine
 from trailweaver.incidents import Incident, IncidentFactory
 from trailweaver.models import NormalizedEvent
+from trailweaver.observability import log_event, safe_source_label
 from trailweaver.rules import AWS_RULES
 from trailweaver.signals import Signal
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -104,6 +108,17 @@ class InvestigationRunner:
     ) -> InvestigationExecutionResult:
         """Analyze and persist the accepted events from an existing M20 result."""
 
+        source = safe_source_label(ingestion_result.source_label)
+        log_event(
+            _LOGGER,
+            logging.INFO,
+            "investigation_started",
+            source=source,
+            source_records=ingestion_result.total_records,
+            accepted=ingestion_result.accepted_records,
+            failed=ingestion_result.failed_records,
+            duplicates=ingestion_result.duplicate_records,
+        )
         analyzed_events = _order_events_for_analysis(ingestion_result.events)
         signals = tuple(
             signal
@@ -116,10 +131,41 @@ class InvestigationRunner:
             for correlation in correlations
         )
 
+        log_event(
+            _LOGGER,
+            logging.INFO,
+            "investigation_analyzed",
+            source=source,
+            events=len(analyzed_events),
+            signals=len(signals),
+            correlations=len(correlations),
+            incidents=len(incidents),
+        )
+
         persisted_incidents: list[Incident] = []
-        for incident in incidents:
-            self._incident_repository.save_incident(incident)
-            persisted_incidents.append(incident)
+        try:
+            for incident in incidents:
+                self._incident_repository.save_incident(incident)
+                persisted_incidents.append(incident)
+        except Exception as error:
+            log_event(
+                _LOGGER,
+                logging.ERROR,
+                "incident_persistence_failed",
+                source=source,
+                persisted=len(persisted_incidents),
+                expected=len(incidents),
+                error_type=type(error).__name__,
+            )
+            raise
+
+        log_event(
+            _LOGGER,
+            logging.INFO,
+            "investigation_completed",
+            source=source,
+            persisted=len(persisted_incidents),
+        )
 
         return InvestigationExecutionResult(
             ingestion_result=ingestion_result,

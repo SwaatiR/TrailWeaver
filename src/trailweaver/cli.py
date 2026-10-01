@@ -1,6 +1,7 @@
 """Thin command-line adapter for TrailWeaver application services."""
 
 import argparse
+import logging
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -27,13 +28,19 @@ from trailweaver.cloudtrail_ingestion import (
     DEFAULT_MAX_SOURCE_BYTES,
     CloudTrailIngestionError,
 )
-from trailweaver.runtime import RuntimeConfig, RuntimeConfigurationError
+from trailweaver.observability import configure_logging, log_event
+from trailweaver.runtime import (
+    RuntimeConfig,
+    RuntimeConfigurationError,
+    validate_cors_origins,
+)
 
 EXIT_SUCCESS = 0
 EXIT_SOURCE_ERROR = 3
 EXIT_RUNTIME_ERROR = 4
 
 ServerRunner = Callable[..., None]
+_LOGGER = logging.getLogger(__name__)
 
 
 def main(
@@ -57,6 +64,8 @@ def main(
 
     parser = _build_parser(config)
     arguments = parser.parse_args(argv)
+    log_level = arguments.log_level if arguments.command == "serve" else config.log_level
+    configure_logging(log_level, stream=errors)
     database_path = Path(arguments.database).expanduser()
 
     try:
@@ -104,13 +113,25 @@ def main(
             host=arguments.host,
             port=arguments.port,
             log_level=arguments.log_level,
+            access_log=False,
         )
         return EXIT_SUCCESS
     except (CloudTrailIngestionError, S3CloudTrailSourceError) as error:
+        log_event(
+            _LOGGER,
+            logging.ERROR,
+            "source_failed",
+            error_type=type(error).__name__,
+        )
         print(f"Source error: {error}", file=errors)
         return EXIT_SOURCE_ERROR
     except (IncidentRepositoryError, OSError) as error:
-        del error
+        log_event(
+            _LOGGER,
+            logging.ERROR,
+            "runtime_failed",
+            error_type=type(error).__name__,
+        )
         print("Runtime error: incident storage is unavailable", file=errors)
         return EXIT_RUNTIME_ERROR
     except RuntimeConfigurationError as error:
@@ -222,9 +243,7 @@ def _non_empty(value: str) -> str:
 
 
 def _validated_origins(origins: tuple[str, ...]) -> tuple[str, ...]:
-    if "*" in origins:
-        raise RuntimeConfigurationError("CORS origins must be explicit, not '*'")
-    return origins
+    return validate_cors_origins(origins)
 
 
 if __name__ == "__main__":

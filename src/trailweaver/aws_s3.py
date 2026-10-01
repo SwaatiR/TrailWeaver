@@ -1,6 +1,7 @@
 """AWS S3 infrastructure adapter for CloudTrail objects."""
 
 import gzip
+import logging
 import zlib
 from dataclasses import dataclass
 from io import BytesIO
@@ -15,11 +16,14 @@ from trailweaver.api.execution import (
 )
 from trailweaver.cloudtrail_ingestion import (
     DEFAULT_MAX_SOURCE_BYTES,
+    CloudTrailIngestionError,
     CloudTrailIngestionResult,
     ingest_cloudtrail_json,
 )
+from trailweaver.observability import log_event, safe_source_label
 
 DEFAULT_MAX_S3_OBJECT_BYTES = 10 * 1024 * 1024
+_LOGGER = logging.getLogger(__name__)
 
 
 class S3StreamingBody(Protocol):
@@ -184,26 +188,51 @@ class S3CloudTrailAdapter:
         decompressed_limit = _validate_limit(
             max_decompressed_bytes, "max_decompressed_bytes"
         )
-        source = self.fetch_object(
-            bucket=bucket,
-            key=key,
-            version_id=version_id,
-            max_object_bytes=max_object_bytes,
+        label = safe_source_label(
+            f"s3://{bucket}/{key}" if source_label is None else source_label
         )
-        content = (
-            _decompress_gzip(source.content, max_bytes=decompressed_limit)
-            if _is_gzip(source)
-            else source.content
+        log_event(_LOGGER, logging.INFO, "aws_ingestion_started", source=label)
+        try:
+            source = self.fetch_object(
+                bucket=bucket,
+                key=key,
+                version_id=version_id,
+                max_object_bytes=max_object_bytes,
+            )
+            content = (
+                _decompress_gzip(source.content, max_bytes=decompressed_limit)
+                if _is_gzip(source)
+                else source.content
+            )
+            result = ingest_cloudtrail_json(
+                content,
+                source_label=(
+                    source.provenance.source_label
+                    if source_label is None
+                    else source_label
+                ),
+                max_source_bytes=decompressed_limit,
+            )
+        except (S3CloudTrailSourceError, CloudTrailIngestionError) as error:
+            log_event(
+                _LOGGER,
+                logging.ERROR,
+                "aws_ingestion_failed",
+                source=label,
+                error_type=type(error).__name__,
+            )
+            raise
+        log_event(
+            _LOGGER,
+            logging.INFO,
+            "aws_ingestion_completed",
+            source=label,
+            source_records=result.total_records,
+            accepted=result.accepted_records,
+            failed=result.failed_records,
+            duplicates=result.duplicate_records,
         )
-        return ingest_cloudtrail_json(
-            content,
-            source_label=(
-                source.provenance.source_label
-                if source_label is None
-                else source_label
-            ),
-            max_source_bytes=decompressed_limit,
-        )
+        return result
 
     def run_object(
         self,

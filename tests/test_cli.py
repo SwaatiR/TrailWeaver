@@ -7,7 +7,7 @@ import pytest
 
 from trailweaver.api.sqlite_repository import SQLiteIncidentRepository
 from trailweaver.cli import EXIT_RUNTIME_ERROR, EXIT_SOURCE_ERROR, main
-from trailweaver.runtime import RuntimeConfig
+from trailweaver.runtime import RuntimeConfig, RuntimeConfigurationError
 
 SAMPLES = Path(__file__).parents[1] / "samples" / "cloudtrail"
 ATTACK_FIXTURE = SAMPLES / "account-compromise-sequence.json"
@@ -56,7 +56,12 @@ def test_local_attack_analysis_persists_incident_and_prints_safe_summary(
     )
 
     assert exit_code == 0
-    assert errors.getvalue() == ""
+    log_records = [json.loads(line) for line in errors.getvalue().splitlines()]
+    assert [record["event"] for record in log_records] == [
+        "investigation_started",
+        "investigation_analyzed",
+        "investigation_completed",
+    ]
     assert "source records: 3" in output.getvalue()
     assert "signals: 3" in output.getvalue()
     assert "incidents: 1" in output.getvalue()
@@ -198,7 +203,12 @@ def test_serve_uses_validated_environment_and_cli_precedence(tmp_path: Path) -> 
 
     assert exit_code == 0
     assert calls == [
-        {"host": "0.0.0.0", "port": 9000, "log_level": "warning"}
+        {
+            "host": "0.0.0.0",
+            "port": 9000,
+            "log_level": "warning",
+            "access_log": False,
+        }
     ]
 
 
@@ -218,7 +228,11 @@ def test_missing_file_returns_source_error_without_traceback(tmp_path: Path) -> 
     )
 
     assert exit_code == EXIT_SOURCE_ERROR
-    assert errors.getvalue() == "Source error: Unable to read CloudTrail source file\n"
+    assert errors.getvalue().endswith(
+        "Source error: Unable to read CloudTrail source file\n"
+    )
+    assert "source_failed" in errors.getvalue()
+    assert "Traceback" not in errors.getvalue()
     assert str(tmp_path) not in errors.getvalue()
 
 
@@ -259,6 +273,21 @@ def test_runtime_config_parses_prefixed_environment(tmp_path: Path) -> None:
         "https://two.example",
     )
     assert config.log_level == "debug"
+
+
+@pytest.mark.parametrize(
+    "origin",
+    (
+        "dashboard.example",
+        "ftp://dashboard.example",
+        "https://user:password@dashboard.example",
+        "https://dashboard.example/path",
+        "https://dashboard.example?token=secret",
+    ),
+)
+def test_runtime_config_rejects_malformed_cors_origins(origin: str) -> None:
+    with pytest.raises(RuntimeConfigurationError, match="HTTP\\(S\\) origins"):
+        RuntimeConfig.from_environment({"TRAILWEAVER_CORS_ORIGINS": origin})
 
 
 def test_cli_output_never_contains_raw_evidence_marker(tmp_path: Path) -> None:

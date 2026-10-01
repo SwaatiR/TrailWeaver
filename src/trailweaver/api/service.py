@@ -24,6 +24,9 @@ class IncidentRepository(Protocol):
     def save_incident(self, incident: Incident) -> None:
         """Insert an incident, failing if its ID already exists."""
 
+    def check_health(self) -> None:
+        """Raise when the repository cannot serve lightweight requests."""
+
 
 class IncidentAlreadyExistsError(ValueError):
     """Raised when a repository is asked to insert an existing incident ID."""
@@ -59,6 +62,9 @@ class InMemoryIncidentRepository:
             )
         self._incidents = (*self._incidents, incident)
         self._incidents_by_id[incident.incident_id] = incident
+
+    def check_health(self) -> None:
+        """The process-local repository has no external dependency."""
 
 
 class IncidentNotFoundError(LookupError):
@@ -107,6 +113,11 @@ class IncidentAnalysisService:
         """Return all incidents from the configured source."""
 
         return self._repository.list_incidents()
+
+    def check_readiness(self) -> None:
+        """Verify the repository dependency without loading incident evidence."""
+
+        self._repository.check_health()
 
     def get_incident(self, incident_id: str) -> Incident:
         """Return one incident or raise a transport-neutral lookup error."""

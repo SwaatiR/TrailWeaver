@@ -4,6 +4,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 _LOG_LEVELS = frozenset({"critical", "error", "warning", "info", "debug"})
 
@@ -79,10 +80,30 @@ def _parse_port(value: str) -> int:
 
 def _parse_origins(value: str) -> tuple[str, ...]:
     origins = tuple(dict.fromkeys(item.strip() for item in value.split(",") if item.strip()))
-    if "*" in origins:
-        raise RuntimeConfigurationError(
-            "TRAILWEAVER_CORS_ORIGINS must list explicit origins, not '*'"
-        )
+    return validate_cors_origins(origins)
+
+
+def validate_cors_origins(origins: tuple[str, ...]) -> tuple[str, ...]:
+    """Require explicit HTTP(S) origins without credentials, paths, or queries."""
+
+    for origin in origins:
+        if origin == "*":
+            raise RuntimeConfigurationError(
+                "TRAILWEAVER_CORS_ORIGINS must list explicit origins, not '*'"
+            )
+        parsed = urlsplit(origin)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise RuntimeConfigurationError(
+                "TRAILWEAVER_CORS_ORIGINS must contain only HTTP(S) origins"
+            )
     return origins
 
 

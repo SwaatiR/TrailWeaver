@@ -8,6 +8,7 @@ from fastapi import FastAPI
 
 from trailweaver.api.app import create_app
 from trailweaver.api.service import InMemoryIncidentRepository
+from trailweaver.api.sqlite_repository import IncidentRepositoryError
 from trailweaver.cloud_context import (
     CloudAsset,
     CloudAssetType,
@@ -194,6 +195,39 @@ def test_health_returns_ok() -> None:
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_readiness_checks_repository_and_returns_ok() -> None:
+    response = _client().get("/ready")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_api_adds_basic_security_and_evidence_cache_headers() -> None:
+    health = _client().get("/health")
+    incidents = _client().get("/api/v1/incidents")
+
+    for response in (health, incidents):
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.headers["x-frame-options"] == "DENY"
+        assert response.headers["referrer-policy"] == "no-referrer"
+    assert "cache-control" not in health.headers
+    assert incidents.headers["cache-control"] == "no-store"
+
+
+def test_repository_failure_is_sanitized_as_unavailable() -> None:
+    class UnavailableRepository(InMemoryIncidentRepository):
+        def check_health(self) -> None:
+            raise IncidentRepositoryError("sensitive sqlite internals")
+
+    client = _ApiClient(create_app(repository=UnavailableRepository()))
+
+    response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Incident storage is unavailable"}
+    assert "sensitive sqlite internals" not in response.text
 
 
 def test_default_cors_allows_local_vite_origin() -> None:

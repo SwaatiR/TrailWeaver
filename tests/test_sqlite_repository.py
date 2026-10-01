@@ -77,6 +77,12 @@ def test_new_database_initializes_versioned_schema_and_lists_empty(tmp_path) -> 
         assert tables == {"incidents", "correlation_matches", "signals", "sqlite_sequence"}
 
 
+def test_repository_health_check_is_lightweight_and_successful(tmp_path) -> None:
+    repository = SQLiteIncidentRepository(tmp_path / "ready.sqlite3")
+
+    assert repository.check_health() is None
+
+
 def test_reopen_round_trip_preserves_domain_and_derived_analysis(tmp_path) -> None:
     database = tmp_path / "incidents.sqlite3"
     incident = create_demo_incident()

@@ -168,6 +168,25 @@ class SQLiteIncidentRepository:
         except (sqlite3.Error, TypeError, ValueError) as error:
             raise IncidentRepositoryError("Unable to save incident") from error
 
+    def check_health(self) -> None:
+        """Verify SQLite connectivity and schema version without loading evidence."""
+
+        try:
+            with closing(self._connect()) as connection:
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+                if version != _SCHEMA_VERSION:
+                    raise UnsupportedSchemaVersionError(
+                        f"Unsupported SQLite incident schema version {version}; "
+                        f"this application supports {_SCHEMA_VERSION}"
+                    )
+                connection.execute("SELECT 1").fetchone()
+        except UnsupportedSchemaVersionError:
+            raise
+        except sqlite3.Error as error:
+            raise IncidentRepositoryError(
+                "Incident repository readiness check failed"
+            ) from error
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._database_path, timeout=5.0)
         connection.row_factory = sqlite3.Row
