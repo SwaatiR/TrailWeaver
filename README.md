@@ -331,6 +331,63 @@ expose them, and M19 incident persistence still does not store them. M20 stops a
 normalization: it does not run detection or correlation, create incidents, persist
 ingestion results, expose an upload endpoint, or connect to live AWS services.
 
+### M21: End-to-end investigation execution pipeline
+
+`InvestigationRunner` is the explicit synchronous application workflow that connects
+the existing stages without reimplementing any of them:
+
+```text
+CloudTrail export -> M20 ingestion -> normalized events -> AWS detections
+                  -> AWS correlations -> incident creation -> incident repository
+                  -> existing read API and dashboard
+```
+
+Callers can inject the detection engine, correlation engine, incident factory, and any
+`IncidentRepository` implementation directly. The canonical configuration is available
+through `create_default_investigation_runner(repository)`, which creates fresh engines
+from `AWS_RULES` and `AWS_CORRELATION_RULES`:
+
+```python
+from trailweaver.api.execution import create_default_investigation_runner
+from trailweaver.api.sqlite_repository import SQLiteIncidentRepository
+
+repository = SQLiteIncidentRepository("investigations.sqlite3")
+runner = create_default_investigation_runner(repository)
+result = runner.run_cloudtrail_file("export.json", source_label="analyst-upload-42")
+print(result.analyzed_event_count, result.signal_count, result.incident_count)
+```
+
+The complete M20 result is retained in the execution result, including partial-ingestion
+failures and duplicate diagnostics. Successfully accepted events continue through
+analysis. An accepted event that matches no detection remains a successfully analyzed
+event; a valid signal that does not complete a correlation remains a reported signal;
+and zero incidents is a successful pipeline result.
+
+M20 continues to preserve source order. M21 creates a separate analysis ordering by
+event timestamp, retaining original source position for equal timestamps. Detection
+runs once per event in that order and preserves rule-pack order. The existing
+correlation engine receives the resulting signal batch and remains authoritative for
+sequence windows, actor matching, and signal reuse.
+
+Generated incidents are saved sequentially through the repository contract. Each
+successful save is durable according to that repository, but the contract has no atomic
+multi-incident transaction: if a later save fails, earlier saves remain and subsequent
+incidents are not attempted. Repository failures propagate and are never reported as a
+successful execution.
+
+Reprocessing is **not idempotent in M21**. CloudTrail event IDs are source-provided, but
+the existing `Signal`, `CorrelationMatch`, and `Incident` models generate new UUID4
+identities on each execution. Running the same source twice therefore normally creates
+and persists a second independently identified incident. An
+`IncidentAlreadyExistsError` is not treated as prior successful processing because a
+random ID collision does not prove evidence equivalence. M21 does not add a file-hash,
+processed-source table, or replacement identity scheme.
+
+This pipeline is an in-process application primitive, not production-scale ingestion.
+It adds no POST/upload endpoint, frontend upload flow, live AWS access, background jobs,
+source-event persistence, or cloud-context discovery. `CloudContext` remains separately
+injected into the existing read/analysis service when blast-radius analysis is desired.
+
 ## Dashboard behavior and limits
 
 - Incident analyses load independently so one failed endpoint does not erase successful

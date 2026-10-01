@@ -1,0 +1,65 @@
+{
+  "Records": [
+    {
+      "eventVersion": "1.11",
+      "userIdentity": {
+        "type": "IAMUser",
+        "principalId": "AIDAEXAMPLEDEVELOPER",
+        "arn": "arn:aws:iam::111122223333:user/developer",
+        "accountId": "111122223333",
+        "userName": "developer"
+      },
+      "eventTime": "2026-09-23T10:10:00Z",
+      "eventSource": "iam.amazonaws.com",
+      "eventName": "AttachUserPolicy",
+      "awsRegion": "us-east-1",
+      "sourceIPAddress": "198.51.100.24",
+      "requestParameters": {
+        "userName": "developer",
+        "policyArn": "arn:aws:iam::aws:policy/AdministratorAccess"
+      },
+      "eventID": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
+      "eventType": "AwsApiCall",
+      "managementEvent": true
+    },
+    {
+      "eventVersion": "1.11",
+      "userIdentity": {
+        "type": "IAMUser",
+        "principalId": "AIDAEXAMPLEDEVELOPER",
+        "arn": "arn:aws:iam::111122223333:user/developer",
+        "accountId": "111122223333",
+        "userName": "developer"
+      },
+      "eventTime": "2026-09-23T10:00:00Z",
+      "eventSource": "signin.amazonaws.com",
+      "eventName": "ConsoleLogin",
+      "awsRegion": "us-east-1",
+      "sourceIPAddress": "198.51.100.24",
+      "responseElements": {"ConsoleLogin": "Success"},
+      "additionalEventData": {"MFAUsed": "No"},
+      "eventID": "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb",
+      "eventType": "AwsConsoleSignIn",
+      "managementEvent": true
+    },
+    {
+      "eventVersion": "1.11",
+      "userIdentity": {
+        "type": "IAMUser",
+        "principalId": "AIDAEXAMPLEDEVELOPER",
+        "arn": "arn:aws:iam::111122223333:user/developer",
+        "accountId": "111122223333",
+        "userName": "developer"
+      },
+      "eventTime": "2026-09-23T10:05:00Z",
+      "eventSource": "iam.amazonaws.com",
+      "eventName": "CreateAccessKey",
+      "awsRegion": "us-east-1",
+      "sourceIPAddress": "198.51.100.24",
+      "requestParameters": {"userName": "developer"},
+      "eventID": "cccccccc-3333-4333-8333-cccccccccccc",
+      "eventType": "AwsApiCall",
+      "managementEvent": true
+    }
+  ]
+}
