@@ -453,6 +453,36 @@ access-key flags. Source failures and runtime/storage failures have distinct non
 exit codes. The CLI is synchronous and processes one explicitly requested source per
 invocation; it is not a watcher or background job system.
 
+### M24: Containerized runtime
+
+The local container topology follows the current application split: one Python API
+container and one Nginx container serving the built dashboard. The dashboard uses the
+same-origin `/api` and `/health` proxy paths. Only the dashboard port is published by
+Compose; the API remains on the private Compose network. Run the stack with:
+
+```bash
+docker compose up --build
+```
+
+Open `http://localhost:8080`. SQLite lives at `/data/incidents.sqlite3` on the named
+`incidents` volume, outside the image's writable layer. To keep that data, retain the
+volume when replacing containers; `docker compose down -v` deletes it. The API image
+runs as an unprivileged user and has a `/health` container check. The dashboard image
+has a local Nginx health check and proxies API traffic to the internal service.
+
+Runtime Python dependencies are pinned in `requirements-runtime.lock`, and the
+dashboard build uses `npm ci` with the committed lockfile. The root and frontend
+`.dockerignore` files exclude local AWS configuration, environment files, databases,
+dependencies, tests, fixtures, and build output from image contexts. The images contain
+no AWS credentials. For local S3 commands, use the host AWS profile/provider chain with
+a read-only mount of the specific AWS config directory and set `AWS_PROFILE`; on AWS,
+M27 will configure a workload role. Never pass credentials as image build arguments or
+copy them into an image.
+
+This is a local two-container packaging setup. The API remains a single SQLite-backed
+instance, and local Compose does not provide durable storage outside the named volume's
+lifecycle or configure an AWS deployment.
+
 ## Dashboard behavior and limits
 
 - Incident analyses load independently so one failed endpoint does not erase successful

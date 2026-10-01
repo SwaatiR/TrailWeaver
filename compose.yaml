@@ -1,0 +1,32 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      TRAILWEAVER_DATABASE_PATH: /data/incidents.sqlite3
+      TRAILWEAVER_API_HOST: 0.0.0.0
+      TRAILWEAVER_API_PORT: 8000
+      TRAILWEAVER_CORS_ORIGINS: ""
+      TRAILWEAVER_LOG_LEVEL: info
+    volumes:
+      - incidents:/data
+    expose:
+      - "8000"
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_TRAILWEAVER_API_URL: /
+    ports:
+      - "${TRAILWEAVER_DASHBOARD_PORT:-8080}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  incidents:

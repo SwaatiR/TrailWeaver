@@ -225,3 +225,7 @@ def _validated_origins(origins: tuple[str, ...]) -> tuple[str, ...]:
     if "*" in origins:
         raise RuntimeConfigurationError("CORS origins must be explicit, not '*'")
     return origins
+
+
+if __name__ == "__main__":
+    raise SystemExit(entrypoint())
