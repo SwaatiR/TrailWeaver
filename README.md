@@ -411,6 +411,48 @@ prefix and only returns metadata. It never automatically ingests every listed ob
 M22 adds no bucket discovery, live polling, queues, event notifications, processed-file
 tracking, or changes to CloudTrail source data.
 
+### M23: Runtime CLI and configuration
+
+The `trailweaver` console command is a thin adapter over M20-M22 application services.
+It analyzes one local export, analyzes one explicitly named S3 object, or serves the
+existing read-only API:
+
+```bash
+trailweaver --database ~/.local/share/trailweaver/incidents.sqlite3 \
+  analyze-file export.json
+
+trailweaver --database ~/.local/share/trailweaver/incidents.sqlite3 \
+  analyze-s3 --bucket example-cloudtrail-bucket \
+  --key AWSLogs/111122223333/CloudTrail/us-east-1/export.json.gz \
+  --region us-east-1
+
+trailweaver --database ~/.local/share/trailweaver/incidents.sqlite3 \
+  serve --host 127.0.0.1 --port 8000
+```
+
+Analysis output contains only stage counts: source records, accepted records, failures,
+duplicates, analyzed events, signals, correlations, created incidents, and persisted
+incidents. Raw CloudTrail payloads are never printed. A successful benign analysis may
+report zero signals and incidents. Repeating analysis remains non-idempotent and may
+persist another independently identified incident, as documented for M21.
+
+Runtime environment variables use the `TRAILWEAVER_` prefix:
+
+- `TRAILWEAVER_DATABASE_PATH`
+- `TRAILWEAVER_AWS_REGION`
+- `TRAILWEAVER_API_HOST`
+- `TRAILWEAVER_API_PORT`
+- `TRAILWEAVER_CORS_ORIGINS` as a comma-separated explicit list
+- `TRAILWEAVER_LOG_LEVEL`
+
+CLI flags override environment configuration. Without an explicit database path,
+TrailWeaver uses the platform-style user data location
+`~/.local/share/trailweaver/incidents.sqlite3`; it does not create a database in the
+repository. S3 commands use the standard boto3 credential provider chain and expose no
+access-key flags. Source failures and runtime/storage failures have distinct nonzero
+exit codes. The CLI is synchronous and processes one explicitly requested source per
+invocation; it is not a watcher or background job system.
+
 ## Dashboard behavior and limits
 
 - Incident analyses load independently so one failed endpoint does not erase successful
