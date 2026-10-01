@@ -23,6 +23,7 @@ def _current_time() -> datetime:
 class TimelineEntry:
     """A concise view of one signal in an incident timeline."""
 
+    signal_id: str
     timestamp: datetime
     rule_id: str
     title: str
@@ -59,6 +60,7 @@ class Incident:
 
         return tuple(
             TimelineEntry(
+                signal_id=signal.signal_id,
                 timestamp=signal.timestamp,
                 rule_id=signal.rule_id,
                 title=signal.title,

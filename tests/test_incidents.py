@@ -170,6 +170,9 @@ def test_timeline_preserves_signal_metadata() -> None:
     correlation_match = _correlation_match()
     incident = IncidentFactory().create(correlation_match)
 
+    assert tuple(entry.signal_id for entry in incident.timeline) == tuple(
+        signal.signal_id for signal in correlation_match.signals
+    )
     assert tuple(entry.rule_id for entry in incident.timeline) == tuple(
         signal.rule_id for signal in correlation_match.signals
     )

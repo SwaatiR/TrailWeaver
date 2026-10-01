@@ -65,6 +65,34 @@ def test_demo_incident_contains_three_real_detection_signals() -> None:
     assert body["severity"] == "high"
 
 
+def test_demo_timeline_and_graph_share_stable_signal_identity() -> None:
+    client = _demo_client()
+    timeline = client.get(f"/api/v1/incidents/{DEMO_INCIDENT_ID}").json()[
+        "timeline"
+    ]
+    edges = client.get(f"/api/v1/incidents/{DEMO_INCIDENT_ID}/graph").json()[
+        "edges"
+    ]
+
+    assert [entry["signal_id"] for entry in timeline] == [
+        "demo-signal-1",
+        "demo-signal-2",
+        "demo-signal-3",
+    ]
+    timeline_ids = {entry["signal_id"] for entry in timeline}
+    assert [edge["signal_id"] for edge in edges] == [
+        "demo-signal-1",
+        "demo-signal-2",
+        "demo-signal-3",
+    ]
+    assert all(edge["signal_id"] in timeline_ids for edge in edges)
+    assert [edge["relationship"] for edge in edges] == [
+        "logged_in_from",
+        "affected",
+        "granted",
+    ]
+
+
 def test_demo_risk_comes_from_the_real_risk_service() -> None:
     body = _demo_client().get(
         f"/api/v1/incidents/{DEMO_INCIDENT_ID}/risk"

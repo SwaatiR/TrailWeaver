@@ -138,19 +138,10 @@ export function formatObservedAt(value: string): string {
   }).format(date)}`;
 }
 
-/**
- * Connect an edge to its timeline evidence. The incident timeline API
- * does not expose signal IDs, so the join is by exact observed timestamp;
- * the caller must present it as a timestamp match, not an identity join.
- */
+/** Connect an edge to its exact timeline evidence through stable signal identity. */
 export function findTimelineEntryForEdge(
   edge: GraphEdge,
   timeline: TimelineEntry[],
 ): TimelineEntry | null {
-  const edgeTime = new Date(edge.timestamp).valueOf();
-  if (Number.isNaN(edgeTime)) return null;
-  for (const entry of timeline) {
-    if (new Date(entry.timestamp).valueOf() === edgeTime) return entry;
-  }
-  return null;
+  return timeline.find((entry) => entry.signal_id === edge.signal_id) ?? null;
 }

@@ -70,6 +70,7 @@ class ActorResponse(BaseModel):
 class TimelineEntryResponse(BaseModel):
     """One evidence-safe incident timeline entry."""
 
+    signal_id: str
     timestamp: datetime
     rule_id: str
     title: str
@@ -107,6 +108,7 @@ class IncidentDetailResponse(BaseModel):
             primary_actor=None if actor is None else ActorResponse.from_domain(actor),
             timeline=[
                 TimelineEntryResponse(
+                    signal_id=entry.signal_id,
                     timestamp=entry.timestamp,
                     rule_id=entry.rule_id,
                     title=entry.title,

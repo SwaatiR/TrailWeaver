@@ -21,6 +21,7 @@ export interface Actor {
 }
 
 export interface TimelineEntry {
+  signal_id: string;
   timestamp: string;
   rule_id: string;
   title: string;

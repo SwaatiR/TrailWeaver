@@ -43,9 +43,10 @@ def _signal(
     source_ip: str | None = None,
     attributes: SecurityAttributes | None = None,
     raw_event: JsonObject | None = None,
+    signal_id: str | None = None,
 ) -> Signal:
     return Signal(
-        signal_id=f"signal-{minutes}",
+        signal_id=signal_id or f"signal-{minutes}",
         rule_id=rule_id,
         title=f"Signal for {rule_id}",
         description="Normalized signal used by API tests.",
@@ -303,6 +304,11 @@ def test_incident_detail_returns_expected_fields_and_chronological_timeline() ->
     assert body["severity"] == "high"
     assert body["summary"] == "Possible account compromise activity was observed."
     assert [entry["rule_id"] for entry in body["timeline"]] == [LOGIN, ACCESS_KEY, ADMIN]
+    assert [entry["signal_id"] for entry in body["timeline"]] == [
+        "signal-0",
+        "signal-5",
+        "signal-10",
+    ]
     timestamps = [
         datetime.fromisoformat(entry["timestamp"])
         for entry in body["timeline"]
@@ -371,6 +377,70 @@ def test_graph_endpoint_returns_json_safe_nodes_and_edges() -> None:
     assert body["nodes"][0]["node_type"] == "identity"
     assert body["edges"][0]["relationship"] == "logged_in_from"
     _assert_iso8601(body["edges"][0]["timestamp"])
+
+
+def test_same_timestamp_timeline_signals_join_graph_edges_by_stable_id() -> None:
+    first = _signal(
+        LOGIN,
+        minutes=0,
+        source_ip="192.0.2.10",
+        signal_id="same-time-login",
+    )
+    second = _signal(
+        ACCESS_KEY,
+        minutes=0,
+        attributes={"target_user": "alice"},
+        signal_id="same-time-key",
+    )
+    third = _signal(
+        ADMIN,
+        minutes=1,
+        attributes={"target_user": "alice"},
+        signal_id="later-admin",
+    )
+    incident = Incident(
+        incident_id="same-time-incident",
+        title="Same-time evidence",
+        description="Distinct signals share an observed timestamp.",
+        severity=SignalSeverity.HIGH,
+        correlation_match=CorrelationMatch(
+            correlation_id="same-time-correlation",
+            rule_id="aws.identity.possible_account_compromise_sequence",
+            title="Possible AWS account compromise sequence",
+            description="Related AWS identity-security activity was observed.",
+            reason="The normalized signals matched a suspicious sequence.",
+            signals=(first, second, third),
+        ),
+        summary="Same-time evidence remains distinguishable.",
+        created_at=BASE_TIME + timedelta(minutes=2),
+    )
+    client = _client(incident)
+
+    timeline = client.get("/api/v1/incidents/same-time-incident").json()["timeline"]
+    edges = client.get("/api/v1/incidents/same-time-incident/graph").json()["edges"]
+
+    assert timeline[0]["timestamp"] == timeline[1]["timestamp"]
+    assert [entry["signal_id"] for entry in timeline[:2]] == [
+        "same-time-login",
+        "same-time-key",
+    ]
+    assert {edge["signal_id"] for edge in edges} == {
+        "same-time-login",
+        "same-time-key",
+        "later-admin",
+    }
+    timeline_ids = {entry["signal_id"] for entry in timeline}
+    assert all(edge["signal_id"] in timeline_ids for edge in edges)
+    timeline_by_signal = {entry["signal_id"]: entry for entry in timeline}
+    edge_signal_titles = {
+        edge["signal_id"]: timeline_by_signal[edge["signal_id"]]["title"]
+        for edge in edges
+    }
+    assert edge_signal_titles == {
+        "same-time-login": "Signal for aws.auth.console_login_without_mfa",
+        "same-time-key": "Signal for aws.iam.access_key_created",
+        "later-admin": "Signal for aws.iam.admin_policy_attached_to_user",
+    }
 
 
 def test_blast_radius_works_with_cloud_context() -> None:

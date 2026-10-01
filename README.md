@@ -70,16 +70,42 @@ originated, which identities, roles, and resources appear in the incident eviden
 how those entities connect, which signal produced each relationship, and when each
 relationship was observed. Selecting a node shows only data returned by the backend
 (type, label, provider, and available account/region/ARN context). Selecting an edge
-shows its canonical relationship, observed timestamp, and signal reference, linked to
-the matching timeline entry by timestamp so the analyst can see why the edge exists.
-Timestamps and signal references are preserved for chronological replay, but M17
-implements no playback.
+shows its canonical relationship, observed timestamp, and signal reference. The
+incident timeline and graph expose the same stable signal identity, so evidence is
+joined explicitly rather than inferred from matching timestamps.
 
 The attack graph must not be confused with blast radius. The graph contains entities
 and relationships observed in the incident; blast radius estimates potentially
 reachable known assets from explicit permission grants in the loaded cloud context.
 Reachable assets are never added to the graph, and no edge implies access beyond what
-the evidence supports. Attack replay remains future work (M18).
+the evidence supports.
+
+**M18: Temporal Attack Replay** is complete. The Graph workspace retains the complete
+M17 Full Graph and adds a Replay mode that reconstructs the observed incident sequence
+from the existing incident timeline and graph responses. Each timeline observation is
+linked by `signal_id` to zero, one, or multiple graph relationships. This keeps
+same-timestamp signals distinguishable and lets missing linkage degrade honestly
+without guessing.
+
+Replay steps are ordered deterministically by timestamp, then stable signal identity.
+Analysts can move directly between evidence markers, use Previous and Next, run or
+pause restrained automatic playback, and restart at the first observation. The graph
+is cumulative: earlier observed relationships remain visible as later evidence is
+reached, while relationships introduced by the current step receive restrained
+emphasis. Node positions and self-loop geometry are computed from the full observed
+graph and remain stable throughout playback.
+
+Full Graph and Replay preserve separate responsibilities:
+
+- Full Graph shows every observed relationship returned for the incident.
+- Replay reveals evidence-linked observed relationships chronologically.
+- Potential impact remains blast-radius context over known assets and is never animated
+  into the observed graph.
+
+Replay reconstructs existing observed evidence. It does not predict attacker behavior,
+invent intermediary activity, claim that potentially reachable assets were accessed,
+or use AI-generated inference. Its state is deterministic presentation logic over data
+that is already loaded; stepping does not make additional API requests.
 
 The underlying M13 blast-radius foundation keeps provider-neutral representations and
 analysis deliberately separate:

@@ -3,6 +3,7 @@ import { ApiError, apiBaseUrl, trailWeaverApi } from "../api/client";
 import { AttackGraphView } from "../components/AttackGraphView";
 import { Icon, type IconName } from "../components/Icon";
 import { PanelError, PanelSkeleton } from "../components/StatusViews";
+import { orderTimelineEntries } from "../replay/attackReplay";
 import type {
   BlastRadiusResponse,
   GraphResponse,
@@ -56,6 +57,10 @@ function formatTime(value: string): string {
     hour12: false,
     timeZone: "UTC",
   }).format(date);
+}
+
+function timelineAnchorId(signalId: string): string {
+  return `timeline-signal-${encodeURIComponent(signalId)}`;
 }
 
 function titleCase(value: string): string {
@@ -369,10 +374,7 @@ export function InvestigationDashboard() {
 
   const sortedTimeline = useMemo(() => {
     if (detail.status !== "success") return [];
-    return [...detail.data.timeline].sort(
-      (left, right) =>
-        new Date(left.timestamp).valueOf() - new Date(right.timestamp).valueOf(),
-    );
+    return orderTimelineEntries(detail.data.timeline);
   }, [detail]);
 
   const assetCounts = useMemo(() => {
@@ -393,7 +395,28 @@ export function InvestigationDashboard() {
     setActiveView("overview");
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        document.querySelector(hash)?.scrollIntoView({ behavior: "smooth", block: "start" });
+        document.querySelector(hash)?.scrollIntoView({
+          behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+            ? "auto"
+            : "smooth",
+          block: "start",
+        });
+      });
+    });
+  };
+
+  const viewTimelineSignal = (signalId: string) => {
+    setActiveView("overview");
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const entry = document.getElementById(timelineAnchorId(signalId));
+        entry?.scrollIntoView({
+          behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+            ? "auto"
+            : "smooth",
+          block: "center",
+        });
+        entry?.focus({ preventScroll: true });
       });
     });
   };
@@ -587,7 +610,7 @@ export function InvestigationDashboard() {
                 <SectionHeading
                   id="graph-title"
                   title="Attack graph"
-                  description="Observed relationships from incident evidence. Timestamps and signal references are preserved so the sequence can be replayed later. Potential reachability lives under Potential impact — never in this graph."
+                  description="Inspect the complete observed graph or reconstruct how linked relationships appeared through time. Potential reachability lives under Potential impact — never in this graph or replay."
                 />
                 {graph.status === "loading" ? (
                   <div className="graph-workspace graph-workspace--state" role="status" aria-label="Loading attack graph" aria-busy="true" aria-live="polite">
@@ -616,6 +639,7 @@ export function InvestigationDashboard() {
                     key={selectedIncidentId}
                     graph={graph.data}
                     timeline={sortedTimeline}
+                    onViewTimeline={viewTimelineSignal}
                   />
                 ) : null}
               </section>
@@ -745,7 +769,11 @@ export function InvestigationDashboard() {
                   {detail.status === "success" && sortedTimeline.length > 0 ? (
                     <ol className="timeline-list">
                       {sortedTimeline.map((entry, index) => (
-                        <li key={`${entry.rule_id}-${entry.timestamp}`}>
+                        <li
+                          key={entry.signal_id}
+                          id={timelineAnchorId(entry.signal_id)}
+                          tabIndex={-1}
+                        >
                           <div className="timeline-node" aria-hidden="true">{index + 1}</div>
                           <time dateTime={entry.timestamp}>{formatTime(entry.timestamp)}</time>
                           <div className="timeline-event">
