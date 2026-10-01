@@ -20,8 +20,8 @@ resource wildcard for `ecr:GetAuthorizationToken`, which AWS does not support sc
 to a repository. The application task role is separate and has no wildcard resources;
 its S3 access is constrained to the configured bucket and prefix.
 
-M26 does not create an ECS task/service, load balancer, public listener, CloudTrail
-trail, or bucket. Deployment resources are layered on this foundation in M27.
+M27 layers a one-task ECS service and restricted HTTPS load balancer on this foundation.
+It still does not create a CloudTrail trail, bucket, VPC, DNS record, or certificate.
 
 ## Planning
 
@@ -35,7 +35,12 @@ terraform plan \
   -var='vpc_id=vpc-0123456789abcdef0' \
   -var='application_subnet_ids=["subnet-0123456789abcdef0","subnet-0fedcba9876543210"]' \
   -var='cloudtrail_bucket_name=example-private-cloudtrail' \
-  -var='cloudtrail_prefix=AWSLogs/111122223333/CloudTrail'
+  -var='cloudtrail_prefix=AWSLogs/111122223333/CloudTrail' \
+  -var='load_balancer_subnet_ids=["subnet-00112233445566778","subnet-88776655443322110"]' \
+  -var='allowed_ingress_cidrs=["203.0.113.10/32"]' \
+  -var='certificate_arn=arn:aws:acm:us-east-1:111122223333:certificate/00000000-0000-0000-0000-000000000000' \
+  -var='api_image_tag=<reviewed-git-sha>' \
+  -var='dashboard_image_tag=<reviewed-git-sha>'
 ```
 
 The IDs and names above are fictional. Supply subnets in distinct availability zones.
@@ -49,3 +54,5 @@ state backups because state contains infrastructure metadata.
 
 SQLite on EFS remains a single-writer, single-task deployment constraint. EFS supplies
 durability across task replacement; it does not make SQLite safe for horizontal scale.
+See `docs/aws-deployment.md` for the complete build, publish, apply, verify, rollback,
+and destroy procedure.

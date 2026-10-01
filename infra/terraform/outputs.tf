@@ -42,3 +42,13 @@ output "efs_access_point_id" {
   description = "EFS access point ID configured for the non-root API user."
   value       = aws_efs_access_point.incidents.id
 }
+
+output "application_url" {
+  description = "HTTPS URL of the TrailWeaver load balancer; configure DNS separately for certificate hostname validation."
+  value       = "https://${aws_lb.this.dns_name}"
+}
+
+output "ecs_service_name" {
+  description = "Name of the single-instance TrailWeaver ECS service."
+  value       = aws_ecs_service.this.name
+}

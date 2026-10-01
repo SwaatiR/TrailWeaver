@@ -30,6 +30,71 @@ variable "application_subnet_ids" {
   }
 }
 
+variable "load_balancer_subnet_ids" {
+  description = "Existing public subnet IDs for the internet-facing application load balancer."
+  type        = set(string)
+
+  validation {
+    condition     = length(var.load_balancer_subnet_ids) >= 2
+    error_message = "load_balancer_subnet_ids must contain at least two subnets in distinct availability zones."
+  }
+}
+
+variable "allowed_ingress_cidrs" {
+  description = "Explicit IPv4 CIDRs allowed to reach the HTTPS listener; global ingress is rejected."
+  type        = set(string)
+
+  validation {
+    condition = (
+      length(var.allowed_ingress_cidrs) > 0 &&
+      !contains(var.allowed_ingress_cidrs, "0.0.0.0/0")
+    )
+    error_message = "allowed_ingress_cidrs must be non-empty and must not contain 0.0.0.0/0."
+  }
+}
+
+variable "certificate_arn" {
+  description = "ARN of an existing ACM certificate for the HTTPS listener."
+  type        = string
+
+  validation {
+    condition     = startswith(var.certificate_arn, "arn:aws:acm:")
+    error_message = "certificate_arn must be an ACM certificate ARN."
+  }
+}
+
+variable "api_image_tag" {
+  description = "Immutable API image tag already pushed to the managed ECR repository."
+  type        = string
+
+  validation {
+    condition     = trimspace(var.api_image_tag) != "" && var.api_image_tag != "latest"
+    error_message = "api_image_tag must be a non-empty immutable release identifier, not latest."
+  }
+}
+
+variable "dashboard_image_tag" {
+  description = "Immutable dashboard image tag already pushed to the managed ECR repository."
+  type        = string
+
+  validation {
+    condition     = trimspace(var.dashboard_image_tag) != "" && var.dashboard_image_tag != "latest"
+    error_message = "dashboard_image_tag must be a non-empty immutable release identifier, not latest."
+  }
+}
+
+variable "task_cpu" {
+  description = "Fargate task CPU units."
+  type        = number
+  default     = 512
+}
+
+variable "task_memory" {
+  description = "Fargate task memory in MiB."
+  type        = number
+  default     = 1024
+}
+
 variable "cloudtrail_bucket_name" {
   description = "Name of an existing private bucket containing CloudTrail exports."
   type        = string

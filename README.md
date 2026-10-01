@@ -510,6 +510,21 @@ should configure a protected remote backend. The infrastructure preserves the cu
 single-instance SQLite constraint rather than pretending that EFS enables horizontal
 database writers. See `infra/terraform/README.md` for planning inputs and boundaries.
 
+### M27: AWS deployment configuration
+
+Terraform deploys the existing images as one ECS/Fargate task: API plus dashboard. The
+dashboard proxies to the task-local API, and an HTTPS-only application load balancer
+admits explicitly configured non-global CIDRs. The API mounts encrypted EFS through a
+UID/GID-matched access point with TLS and IAM authorization. AWS credentials come only
+from the ECS workload/execution roles.
+
+The service is deliberately fixed at one task. Deployments stop the previous task
+before starting its replacement, preserving a single SQLite writer at the cost of
+brief downtime. Operators supply existing VPC/subnets, an ACM certificate, DNS, an
+existing CloudTrail bucket/prefix, and immutable image tags. No live deployment or
+image publication is performed by CI. The safe operational sequence is documented in
+`docs/aws-deployment.md`.
+
 ## Dashboard behavior and limits
 
 - Incident analyses load independently so one failed endpoint does not erase successful
