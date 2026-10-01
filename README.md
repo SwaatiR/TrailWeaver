@@ -253,6 +253,41 @@ The default development application starts with an empty in-memory incident sour
 Applications embedding TrailWeaver can inject existing `Incident` objects and a known
 cloud context through `create_app`.
 
+### M19: Persistent investigation repository
+
+TrailWeaver provides an opt-in `SQLiteIncidentRepository` for retaining complete
+normalized incident evidence across process restarts. It stores incident and
+correlation metadata plus ordered signals and the normalized event fields required to
+reconstruct the existing investigation API. Signal IDs, event IDs, enums, and
+timezone-aware timestamps are preserved. `raw_event` payloads are intentionally not
+copied into this repository; source-record ownership is deferred to M20. SQLite uses
+the standard library and an explicit schema version (`PRAGMA user_version`); a new
+database initializes automatically, compatible files reopen safely, and unknown or
+unversioned schemas fail without destructive replacement.
+
+Risk, MITRE ATT&CK, the observed attack graph, and investigation guidance remain
+deterministic derived views of the stored incident evidence. `CloudContext` is
+separate external context and is not stored inside incidents. Blast-radius results
+therefore remain unavailable unless an application separately supplies the relevant
+cloud context. The repository uses insert-only saves: saving a duplicate incident ID
+raises `IncidentAlreadyExistsError` rather than replacing evidence. Incidents are
+listed in insertion order.
+
+Persistence is explicitly configured; importing the normal application still creates
+no database and it remains empty by default. For an embedding runtime that has
+persisted incidents, construct its read API with `create_persistent_app`:
+
+```python
+from trailweaver.api.app import create_persistent_app
+
+app = create_persistent_app("/var/lib/trailweaver/incidents.sqlite3")
+```
+
+The caller controls the database file path; the repository creates its parent
+directory and schema when explicitly constructed. The demo application remains
+isolated and in-memory. M19 adds persistence only; it does not add CloudTrail
+ingestion, upload endpoints, or a public incident-write API.
+
 ## Dashboard behavior and limits
 
 - Incident analyses load independently so one failed endpoint does not erase successful

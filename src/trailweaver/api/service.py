@@ -1,4 +1,4 @@
-"""Application services and in-memory incident access for the HTTP API."""
+"""Application services and incident repository contracts for the HTTP API."""
 
 from collections.abc import Iterable
 from typing import Protocol
@@ -13,7 +13,7 @@ from trailweaver.risk import RiskAssessment, RiskScorer
 
 
 class IncidentRepository(Protocol):
-    """Read-only access to existing incidents."""
+    """Access to existing incidents and insert-only incident storage."""
 
     def list_incidents(self) -> tuple[Incident, ...]:
         """Return the available incidents in stable order."""
@@ -21,9 +21,16 @@ class IncidentRepository(Protocol):
     def get_incident(self, incident_id: str) -> Incident | None:
         """Return an incident by exact ID, if it exists."""
 
+    def save_incident(self, incident: Incident) -> None:
+        """Insert an incident, failing if its ID already exists."""
+
+
+class IncidentAlreadyExistsError(ValueError):
+    """Raised when a repository is asked to insert an existing incident ID."""
+
 
 class InMemoryIncidentRepository:
-    """An explicit process-local incident source with no persistence semantics."""
+    """An explicit process-local incident source with insert-only save semantics."""
 
     def __init__(self, incidents: Iterable[Incident] = ()) -> None:
         incident_items = tuple(incidents)
@@ -42,6 +49,16 @@ class InMemoryIncidentRepository:
         """Return an incident by exact ID, if it exists."""
 
         return self._incidents_by_id.get(incident_id)
+
+    def save_incident(self, incident: Incident) -> None:
+        """Append a new incident without replacing any existing evidence."""
+
+        if incident.incident_id in self._incidents_by_id:
+            raise IncidentAlreadyExistsError(
+                f"Incident {incident.incident_id!r} already exists"
+            )
+        self._incidents = (*self._incidents, incident)
+        self._incidents_by_id[incident.incident_id] = incident
 
 
 class IncidentNotFoundError(LookupError):

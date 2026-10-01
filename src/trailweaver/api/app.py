@@ -2,6 +2,7 @@
 
 import os
 from collections.abc import Iterable
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,6 +25,7 @@ from trailweaver.api.service import (
     IncidentRepository,
     InMemoryIncidentRepository,
 )
+from trailweaver.api.sqlite_repository import SQLiteIncidentRepository
 from trailweaver.cloud_context import CloudContext
 
 _NO_CLOUD_CONTEXT_REASON = (
@@ -162,6 +164,25 @@ def create_app(
             raise incident_not_found(error) from error
 
     return application
+
+
+def create_persistent_app(
+    database_path: str | Path,
+    *,
+    cloud_context: CloudContext | None = None,
+    cors_origins: Iterable[str] | None = None,
+) -> FastAPI:
+    """Create an API backed by an explicitly configured SQLite file.
+
+    The caller controls when the repository is constructed; importing this module
+    and the default ``app`` never creates a database.
+    """
+
+    return create_app(
+        repository=SQLiteIncidentRepository(database_path),
+        cloud_context=cloud_context,
+        cors_origins=cors_origins,
+    )
 
 
 app = create_app()
