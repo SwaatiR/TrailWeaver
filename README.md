@@ -496,6 +496,20 @@ The workflow grants only read access to repository contents. It does not request
 credentials, publish images, or deploy infrastructure. Deployment remains deliberately
 separate until an explicitly configured AWS environment and release policy exist.
 
+### M26: Terraform AWS foundation
+
+The Terraform root in `infra/terraform` prepares a deliberately small ECS foundation
+inside an operator-supplied VPC. It creates private ECR repositories, an ECS cluster,
+CloudWatch logging, encrypted EFS persistence for SQLite, and workload roles. The S3
+policy grants only list/read access to one explicitly configured existing CloudTrail
+bucket and prefix; TrailWeaver does not create, mutate, or delete CloudTrail evidence.
+
+M26 does not create a trail, CloudTrail bucket, VPC, public listener, or running ECS
+service. Local Terraform state is the default and is gitignored; real environments
+should configure a protected remote backend. The infrastructure preserves the current
+single-instance SQLite constraint rather than pretending that EFS enables horizontal
+database writers. See `infra/terraform/README.md` for planning inputs and boundaries.
+
 ## Dashboard behavior and limits
 
 - Incident analyses load independently so one failed endpoint does not erase successful
