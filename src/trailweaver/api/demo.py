@@ -138,12 +138,22 @@ def create_demo_cloud_context() -> CloudContext:
 
 
 def create_demo_app() -> FastAPI:
-    """Create the opt-in demo API without changing the default application."""
+    """Create the opt-in demo API starting from an empty workspace.
 
-    incident = create_demo_incident()
+    The demo runs the same production file-analysis pipeline over an
+    in-memory repository, keeps the deterministic demo cloud context for
+    blast-radius analysis, and additionally exposes a demo-only workspace
+    reset. S3 analysis stays disabled: the local demo must never need AWS
+    credentials, network access, or a real account.
+    """
+
     return create_app(
-        repository=InMemoryIncidentRepository((incident,)),
+        repository=InMemoryIncidentRepository(),
         cloud_context=create_demo_cloud_context(),
+        enable_analysis=True,
+        enable_s3_analysis=False,
+        demo_mode=True,
+        enable_demo_reset=True,
     )
 
 

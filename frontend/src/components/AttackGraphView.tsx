@@ -860,7 +860,7 @@ export function AttackGraphView({
                   type="button"
                   onClick={() => onViewTimeline(currentStep.signal.signal_id)}
                 >
-                  View in overview timeline
+                  View in timeline
                 </button>
               </div>
             </div>

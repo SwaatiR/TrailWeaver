@@ -8,6 +8,7 @@ export interface IncidentSummary {
   incident_id: string;
   title: string;
   severity: Severity;
+  created_at: string;
   started_at: string;
   ended_at: string;
 }
@@ -145,4 +146,49 @@ export interface GraphEdge {
 export interface GraphResponse {
   nodes: GraphNode[];
   edges: GraphEdge[];
+}
+
+export interface CapabilitiesResponse {
+  file_analysis: boolean;
+  s3_analysis: boolean;
+  demo_mode: boolean;
+}
+
+export interface AnalysisIssue {
+  record_index: number;
+  code: string;
+  event_id: string | null;
+}
+
+export interface AnalysisResponse {
+  source_label: string | null;
+  total_records: number;
+  accepted_records: number;
+  failed_records: number;
+  duplicate_records: number;
+  events_analyzed: number;
+  signals: number;
+  correlations: number;
+  incidents_created: number;
+  persisted_incidents: number;
+  incident_ids: string[];
+  issues: AnalysisIssue[];
+}
+
+export interface S3AnalysisRequest {
+  bucket: string;
+  key: string;
+  version_id?: string;
+  region?: string;
+  source_label?: string;
+}
+
+export interface DemoResetResponse {
+  status: "ok";
+  incidents: number;
+}
+
+export interface ClearWorkspaceResponse {
+  status: "ok";
+  incidents: number;
 }

@@ -24,6 +24,13 @@ class IncidentRepository(Protocol):
     def save_incident(self, incident: Incident) -> None:
         """Insert an incident, failing if its ID already exists."""
 
+    def clear_incidents(self) -> None:
+        """Remove every stored incident, leaving a fresh workspace.
+
+        Only repository contents are affected; no source evidence, files,
+        or external systems are involved.
+        """
+
     def check_health(self) -> None:
         """Raise when the repository cannot serve lightweight requests."""
 
@@ -65,6 +72,16 @@ class InMemoryIncidentRepository:
 
     def check_health(self) -> None:
         """The process-local repository has no external dependency."""
+
+    def clear_incidents(self) -> None:
+        """Remove all stored incidents.
+
+        Demo-workspace support only: no production endpoint exposes this, and
+        the persistent repository offers no equivalent operation.
+        """
+
+        self._incidents = ()
+        self._incidents_by_id = {}
 
 
 class IncidentNotFoundError(LookupError):
@@ -113,6 +130,11 @@ class IncidentAnalysisService:
         """Return all incidents from the configured source."""
 
         return self._repository.list_incidents()
+
+    def clear_workspace(self) -> None:
+        """Remove all persisted incidents so the workspace starts fresh."""
+
+        self._repository.clear_incidents()
 
     def check_readiness(self) -> None:
         """Verify the repository dependency without loading incident evidence."""

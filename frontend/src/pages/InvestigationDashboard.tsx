@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
-import { ApiError, apiBaseUrl, trailWeaverApi } from "../api/client";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { ApiError, trailWeaverApi } from "../api/client";
 import { AttackGraphView } from "../components/AttackGraphView";
 import { Icon, type IconName } from "../components/Icon";
 import { PanelError, PanelSkeleton } from "../components/StatusViews";
 import { orderTimelineEntries } from "../replay/attackReplay";
 import type {
+  AnalysisResponse,
   BlastRadiusResponse,
+  CapabilitiesResponse,
   GraphResponse,
   GuidanceResponse,
   IncidentDetail,
@@ -21,6 +23,11 @@ type Loadable<T> =
   | { status: "error"; message: string };
 
 type BackendStatus = "checking" | "online" | "offline";
+
+type LatestAnalysis = {
+  source: "file" | "s3";
+  result: AnalysisResponse;
+};
 
 const loading = <T,>(): Loadable<T> => ({ status: "loading" });
 const idle = <T,>(): Loadable<T> => ({ status: "idle" });
@@ -187,6 +194,1432 @@ function GuidanceItem({ item, order }: { item: Recommendation; order: number }) 
   );
 }
 
+const WORKFLOW_STEPS = [
+  { name: "CloudTrail evidence", detail: "AWS API records" },
+  { name: "Ingestion", detail: "Normalize exports" },
+  { name: "Detection", detail: "Suspicious behavior" },
+  { name: "Signals", detail: "Observed findings" },
+  { name: "Correlation", detail: "Related activity" },
+  { name: "Incidents", detail: "Correlated cases" },
+  { name: "Investigation", detail: "Timeline and context" },
+] as const;
+
+type Route = "overview" | "incidents" | "history" | "investigation" | "graph";
+
+const ROUTE_HASHES: Record<Route, string> = {
+  overview: "#/overview",
+  incidents: "#/incidents",
+  history: "#/history",
+  investigation: "#/investigation",
+  graph: "#/investigation/graph",
+};
+
+const ROUTE_STORAGE_KEY = "trailweaver.route.v1";
+const WELCOME_STORAGE_KEY = "trailweaver.welcome.v1";
+const HISTORY_CLEARED_STORAGE_KEY = "trailweaver.historyClearedAt.v1";
+
+function parseRouteHash(hash: string): Route | null {
+  if (hash === ROUTE_HASHES.overview) return "overview";
+  if (hash === ROUTE_HASHES.incidents) return "incidents";
+  if (hash === ROUTE_HASHES.history) return "history";
+  if (hash === ROUTE_HASHES.investigation) return "investigation";
+  if (hash === ROUTE_HASHES.graph) return "graph";
+  return null;
+}
+
+function readStoredRoute(): Route | null {
+  try {
+    const stored = window.sessionStorage.getItem(ROUTE_STORAGE_KEY);
+    if (
+      stored === "overview" ||
+      stored === "incidents" ||
+      stored === "history" ||
+      stored === "investigation" ||
+      stored === "graph"
+    ) {
+      return stored;
+    }
+  } catch {
+    // Storage is unavailable; fall back to the default route.
+  }
+  return null;
+}
+
+function readHistoryClearedAt(): string | null {
+  try {
+    const stored = window.sessionStorage.getItem(HISTORY_CLEARED_STORAGE_KEY);
+    if (stored && !Number.isNaN(Date.parse(stored))) return stored;
+  } catch {
+    // Storage is unavailable; no dismissal watermark applies.
+  }
+  return null;
+}
+
+function isRecentInvestigation(createdAt: string, clearedAt: string | null): boolean {
+  // Rolling 24-hour display window only: older investigations stay persisted
+  // and simply fall outside this view. Nothing is ever deleted here.
+  const created = Date.parse(createdAt);
+  if (Number.isNaN(created)) return false;
+  const now = Date.now();
+  // A small future tolerance covers backend/browser clock skew so a
+  // just-created investigation never flickers out of view.
+  if (created < now - 24 * 60 * 60 * 1000 || created > now + 60 * 1000) return false;
+  if (clearedAt !== null && created <= Date.parse(clearedAt)) return false;
+  return true;
+}
+
+function isWelcomeDismissed(): boolean {
+  try {
+    return window.localStorage.getItem(WELCOME_STORAGE_KEY) === "dismissed";
+  } catch {
+    return true;
+  }
+}
+
+function scrollToPanel(targetId: string): void {
+  // In-page scroll that deliberately leaves location.hash alone: the hash
+  // is the route, so section navigation must not write competing anchors.
+  // All investigation section IDs use the inv- prefix so they can never be
+  // mistaken for an application route (routes always contain a slash).
+  const target = document.getElementById(targetId);
+  if (!target) return;
+  const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  target.scrollIntoView({
+    behavior: reduced ? "auto" : "smooth",
+    block: "start",
+  });
+  target.focus({ preventScroll: true });
+}
+
+const INVESTIGATION_SECTIONS = {
+  overview: "inv-overview",
+  timeline: "inv-timeline",
+  analysis: "inv-analysis",
+  reconstruction: "inv-reconstruction",
+  blast: "inv-blast",
+  guidance: "inv-guidance",
+} as const;
+
+function scrollToInvestigationSection(targetId: string): void {
+  scrollToPanel(targetId);
+}
+
+function WorkflowStrip() {
+  return (
+    <ol
+      className="workflow-strip"
+      aria-label="Product workflow: CloudTrail, detection, correlation, incident, investigation"
+    >
+      {WORKFLOW_STEPS.map((step) => (
+        <li key={step.name}>
+          <strong>{step.name}</strong>
+          <span>{step.detail}</span>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function EvidenceWeave() {
+  return (
+    <figure className="evidence-weave">
+      <figcaption className="visually-hidden">
+        Multiple CloudTrail activities pass through detection and correlation
+        to become one explainable investigation.
+      </figcaption>
+      <div className="evidence-weave__meta" aria-hidden="true">
+        <span>CloudTrail activity</span>
+        <span>Correlated outcome</span>
+      </div>
+      <div className="evidence-weave__canvas" aria-hidden="true">
+        <svg
+          className="evidence-weave__paths"
+          viewBox="0 0 640 340"
+          preserveAspectRatio="none"
+        >
+          <path d="M104 55 C210 55 222 125 318 125 S430 170 516 170" />
+          <path d="M104 170 C216 170 246 170 318 170 S430 170 516 170" />
+          <path d="M104 285 C210 285 222 215 318 215 S430 170 516 170" />
+          <circle cx="318" cy="125" r="4" />
+          <circle cx="318" cy="170" r="4" />
+          <circle cx="318" cy="215" r="4" />
+          <circle cx="516" cy="170" r="5" />
+        </svg>
+
+        <div className="evidence-node evidence-node--one">
+          <Icon name="cloud" />
+          <span><strong>Identity event</strong>CloudTrail record</span>
+        </div>
+        <div className="evidence-node evidence-node--two">
+          <Icon name="key" />
+          <span><strong>Credential event</strong>CloudTrail record</span>
+        </div>
+        <div className="evidence-node evidence-node--three">
+          <Icon name="shield" />
+          <span><strong>Policy event</strong>CloudTrail record</span>
+        </div>
+
+        <div className="weave-stage weave-stage--detect">Detection</div>
+        <div className="weave-stage weave-stage--signals">Signals</div>
+        <div className="weave-stage weave-stage--correlate">Correlation</div>
+
+        <div className="weave-outcome">
+          <span className="weave-outcome__icon"><Icon name="incident" /></span>
+          <p>One investigation</p>
+          <strong>Evidence connected in context</strong>
+          <ul>
+            <li>Observed timeline</li>
+            <li>Explainable risk</li>
+            <li>ATT&amp;CK mapping</li>
+          </ul>
+        </div>
+      </div>
+      <div className="evidence-weave__legend" aria-hidden="true">
+        <span><i />Observed evidence</span>
+        <span><i />Interpreted relationship</span>
+      </div>
+    </figure>
+  );
+}
+
+function OverviewHero({
+  populated = false,
+  onOpenInvestigation,
+}: {
+  populated?: boolean;
+  onOpenInvestigation?: () => void;
+}) {
+  return (
+    <section
+      className={`overview-command ${populated ? "overview-command--populated" : ""}`}
+      aria-labelledby="overview-title"
+    >
+      <div className="overview-command__copy">
+        <div className="overview-wordmark" aria-label="TrailWeaver">
+          <span aria-hidden="true">TW</span>
+          <strong>TRAILWEAVER</strong>
+        </div>
+        <h1 id="overview-title">
+          CloudTrail evidence, woven into an investigation.
+        </h1>
+        <p>
+          Detect suspicious AWS activity, connect related signals, and
+          reconstruct explainable incidents for investigation.
+        </p>
+        <div className="overview-command__actions">
+          {populated ? (
+            <button type="button" onClick={onOpenInvestigation}>
+              Open featured investigation
+              <Icon name="arrow" />
+            </button>
+          ) : (
+            <>
+              <button type="button" onClick={() => scrollToPanel("analyze-file")}>
+                Analyze CloudTrail
+                <Icon name="arrow" />
+              </button>
+              <button
+                type="button"
+                className="overview-command__secondary"
+                onClick={() => scrollToPanel("analyze-s3")}
+              >
+                Analyze from AWS S3
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+      <EvidenceWeave />
+    </section>
+  );
+}
+
+function WelcomeCard() {
+  const [dismissed, setDismissed] = useState<boolean>(() => isWelcomeDismissed());
+
+  if (dismissed) return null;
+
+  const dismiss = () => {
+    try {
+      window.localStorage.setItem(WELCOME_STORAGE_KEY, "dismissed");
+    } catch {
+      // Dismissal is best-effort when storage is unavailable.
+    }
+    setDismissed(true);
+  };
+
+  return (
+    <section className="welcome-card" aria-labelledby="welcome-title">
+      <div>
+        <p className="welcome-card__kicker">First time here</p>
+        <h2 id="welcome-title">From CloudTrail evidence to investigation</h2>
+        <ol>
+          <li>
+            <strong>Evidence in.</strong> TrailWeaver analyzes AWS CloudTrail
+            exports — a file upload or an explicit S3 object.
+          </li>
+          <li>
+            <strong>Correlated cases.</strong> Detections become signals,
+            related signals become incidents in the queue.
+          </li>
+          <li>
+            <strong>Investigate.</strong> Open the featured investigation above
+            for its timeline, risk, ATT&amp;CK, graph, replay, and guidance.
+          </li>
+        </ol>
+      </div>
+      <button type="button" onClick={dismiss}>
+        Dismiss welcome
+      </button>
+    </section>
+  );
+}
+
+const MAX_SHOWN_DIAGNOSTICS = 20;
+
+function AnalysisCompletePanel({
+  result,
+  sourceKind,
+  queueCount,
+  analyzeAnotherLabel,
+  onOpenInvestigation,
+  onAnalyzeAnother,
+}: {
+  result: AnalysisResponse;
+  sourceKind: "file" | "s3";
+  queueCount: number;
+  analyzeAnotherLabel: string;
+  onOpenInvestigation: (incidentId: string) => void;
+  onAnalyzeAnother: () => void;
+}) {
+  const headingId = useId();
+  const panelRef = useRef<HTMLElement>(null);
+  const incidentCount = result.incident_ids.length;
+  const hasIncidents = incidentCount > 0;
+  const hasSignalsWithoutIncident = !hasIncidents && result.signals > 0;
+  const shownIssues = result.issues.slice(0, MAX_SHOWN_DIAGNOSTICS);
+  const hiddenIssueCount = result.issues.length - shownIssues.length;
+  const showDiagnostics =
+    result.failed_records > 0 ||
+    result.duplicate_records > 0 ||
+    result.issues.length > 0 ||
+    result.persisted_incidents !== result.incidents_created;
+
+  useEffect(() => {
+    const node = panelRef.current;
+    if (!node) return;
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    node.focus({ preventScroll: true });
+    node.scrollIntoView({
+      behavior: reduced ? "auto" : "smooth",
+      block: "nearest",
+    });
+  }, []);
+
+  const sourceFallback = sourceKind === "file" ? "Uploaded file" : "S3 object";
+
+  return (
+    <section
+      ref={panelRef}
+      className="analysis-complete"
+      aria-labelledby={headingId}
+      tabIndex={-1}
+    >
+      <p className="analysis-complete__kicker">
+        <span aria-hidden="true" />
+        Result of this analysis
+      </p>
+      <h4 id={headingId} className="analysis-complete__title">
+        Analysis complete
+      </h4>
+      <p className="analysis-complete__source">
+        CloudTrail evidence processed successfully. Source:{" "}
+        {result.source_label ?? sourceFallback}
+      </p>
+
+      <dl className="analysis-complete__metrics" aria-label="What this analysis produced">
+        <div className="analysis-complete__metric">
+          <dt>Records processed</dt>
+          <dd>{result.total_records}</dd>
+        </div>
+        <div className="analysis-complete__metric">
+          <dt>Events accepted</dt>
+          <dd>{result.accepted_records}</dd>
+        </div>
+        <div className="analysis-complete__metric">
+          <dt>Signals detected</dt>
+          <dd>
+            {result.signals}
+            <span className="analysis-complete__metric-sub">
+              {result.correlations}{" "}
+              {result.correlations === 1 ? "correlation" : "correlations"}
+            </span>
+          </dd>
+        </div>
+        <div className="analysis-complete__metric">
+          <dt>Incidents created</dt>
+          <dd>
+            {result.incidents_created}
+            <span className="analysis-complete__metric-sub">by this analysis</span>
+          </dd>
+        </div>
+      </dl>
+
+      {hasIncidents ? (
+        <div className="analysis-complete__outcome analysis-complete__outcome--incidents">
+          <p>
+            <strong>
+              {result.incidents_created === 1
+                ? "1 correlated incident created by this analysis."
+                : `${result.incidents_created} correlated incidents created by this analysis.`}
+            </strong>
+          </p>
+          {incidentCount === 1 ? (
+            <p>
+              The incident below is the one this analysis just created. Open
+              it to investigate.
+            </p>
+          ) : (
+            <p>
+              Each entry below is an incident this analysis just created.
+              Open any of them to investigate; the first one is the primary
+              action.
+            </p>
+          )}
+          {incidentCount === 1 ? (
+            <div className="analysis-complete__actions">
+              <button
+                className="retry-button"
+                type="button"
+                onClick={() => {
+                  const first = result.incident_ids[0];
+                  if (first) onOpenInvestigation(first);
+                }}
+              >
+                Open investigation
+              </button>
+              <button
+                className="analysis-complete__secondary"
+                type="button"
+                onClick={onAnalyzeAnother}
+              >
+                {analyzeAnotherLabel}
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="analysis-complete__actions">
+                <button
+                  className="retry-button"
+                  type="button"
+                  onClick={() => {
+                    const first = result.incident_ids[0];
+                    if (first) onOpenInvestigation(first);
+                  }}
+                >
+                  Open first investigation
+                </button>
+                <button
+                  className="analysis-complete__secondary"
+                  type="button"
+                  onClick={onAnalyzeAnother}
+                >
+                  {analyzeAnotherLabel}
+                </button>
+              </div>
+              <ul className="analysis-complete__incident-list">
+                {result.incident_ids.map((incidentId, index) => (
+                  <li key={incidentId}>
+                    <button type="button" onClick={() => onOpenInvestigation(incidentId)}>
+                      Open investigation {index + 1}
+                    </button>
+                    <code>{incidentId}</code>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </div>
+      ) : null}
+
+      {hasSignalsWithoutIncident ? (
+        <div className="analysis-complete__outcome analysis-complete__outcome--signals">
+          <p>
+            <strong>
+              {result.signals === 1
+                ? "1 suspicious signal detected — no correlated incident formed."
+                : `${result.signals} suspicious signals detected — no correlated incident formed.`}
+            </strong>
+          </p>
+          <p>
+            This activity matched a detection rule, but the signals did not
+            form a supported correlated incident. Signals are observed
+            findings; incidents are correlated cases built from related
+            signals. This is not a statement that the AWS account is safe.
+          </p>
+          <div className="analysis-complete__actions">
+            <button
+              className="retry-button"
+              type="button"
+              onClick={onAnalyzeAnother}
+            >
+              {analyzeAnotherLabel}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {!hasIncidents && !hasSignalsWithoutIncident ? (
+        <div className="analysis-complete__outcome analysis-complete__outcome--quiet">
+          <p>
+            <strong>
+              No supported suspicious activity was detected in this analysis.
+            </strong>
+          </p>
+          <p>
+            TrailWeaver did not identify activity matching its current
+            detection and correlation coverage. This is not a statement that
+            the AWS account is safe.
+          </p>
+          <div className="analysis-complete__actions">
+            <button
+              className="retry-button"
+              type="button"
+              onClick={onAnalyzeAnother}
+            >
+              {analyzeAnotherLabel}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {showDiagnostics ? (
+        <div className="analysis-complete__diagnostics">
+          <p>
+            Processing notes: {result.accepted_records} of{" "}
+            {result.total_records} accepted
+            {result.failed_records > 0
+              ? `, ${result.failed_records} rejected`
+              : ""}
+            {result.duplicate_records > 0
+              ? `, ${result.duplicate_records} duplicate${result.duplicate_records === 1 ? "" : "s"} skipped`
+              : ""}
+            .
+          </p>
+          {result.persisted_incidents !== result.incidents_created ? (
+            <p>
+              {result.persisted_incidents} of {result.incidents_created}{" "}
+              created incidents were persisted.
+            </p>
+          ) : null}
+          {result.issues.length > 0 ? (
+            <details>
+              <summary>
+                View {result.issues.length} record diagnostic
+                {result.issues.length === 1 ? "" : "s"}
+              </summary>
+              <ul>
+                {shownIssues.map((issue) => (
+                  <li key={`${issue.record_index}-${issue.code}`}>
+                    <span>Record {issue.record_index}</span>
+                    <code>{issue.code}</code>
+                    {issue.event_id ? <span>{issue.event_id}</span> : null}
+                  </li>
+                ))}
+              </ul>
+              {hiddenIssueCount > 0 ? (
+                <p>
+                  +{hiddenIssueCount} further diagnostic
+                  {hiddenIssueCount === 1 ? "" : "s"} not shown.
+                </p>
+              ) : null}
+            </details>
+          ) : null}
+        </div>
+      ) : null}
+
+      {queueCount > 0 ? (
+        <p className="analysis-complete__queue-note">
+          The incident queue is workspace state and may already list earlier
+          incidents. Only the counts above were created by this analysis.
+        </p>
+      ) : null}
+
+      <p className="analysis-complete__note">
+        Reprocessing the same source is not idempotent: analyzing it again
+        creates a separate incident.
+      </p>
+    </section>
+  );
+}
+
+function FileAnalysisCard({
+  available,
+  unavailableReason,
+  queueCount,
+  analysis,
+  onSuccess,
+  onClear,
+  resetToken,
+  onOpenInvestigation,
+}: {
+  available: boolean;
+  unavailableReason: string | null;
+  queueCount: number;
+  analysis: AnalysisResponse | null;
+  onSuccess: (result: AnalysisResponse) => void;
+  onClear: () => void;
+  resetToken: number;
+  onOpenInvestigation: (incidentId: string) => void;
+}) {
+  const [fileName, setFileName] = useState<string | null>(null);
+  const [payload, setPayload] = useState<ArrayBuffer | null>(null);
+  const [contentType, setContentType] = useState("application/json");
+  const [fileError, setFileError] = useState<string | null>(null);
+  const [state, setState] = useState<Loadable<AnalysisResponse>>(idle());
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    // Scanner reset (e.g. closing an investigation): return the file
+    // scanner to its initial state. Runs harmlessly on mount, when every
+    // field already holds its initial value.
+    setFileName(null);
+    setPayload(null);
+    setFileError(null);
+    setState(idle());
+    if (inputRef.current) inputRef.current.value = "";
+  }, [resetToken]);
+
+  const resetInputValue = () => {
+    // Browsers only emit change when the selection differs, so the native
+    // value must be cleared for the same file to be choosable again.
+    if (inputRef.current) inputRef.current.value = "";
+  };
+
+  const removeFile = () => {
+    // Local scanner state only: no backend call, no incident or storage
+    // impact, and the original file on disk is never touched.
+    setFileName(null);
+    setPayload(null);
+    resetInputValue();
+    inputRef.current?.focus();
+  };
+
+  const chooseFile = (file: File | undefined) => {
+    setFileError(null);
+    if (!file) return;
+    if (file.size > 10 * 1024 * 1024) {
+      setFileName(null);
+      setPayload(null);
+      setFileError("This file exceeds the 10 MiB upload limit.");
+      resetInputValue();
+      return;
+    }
+    const allowed = ["application/json", "application/gzip", "application/x-gzip"];
+    setContentType(
+      allowed.includes(file.type) ? file.type : "application/octet-stream",
+    );
+    void file.arrayBuffer().then(
+      (buffer) => {
+        setFileName(file.name);
+        setPayload(buffer);
+      },
+      () => {
+        setFileName(null);
+        setPayload(null);
+        setFileError("This file could not be read by the browser.");
+      },
+    );
+  };
+
+  const analyze = () => {
+    if (!payload) return;
+    setState(loading());
+    trailWeaverApi
+      .analyzeFile(payload, contentType, fileName ?? undefined)
+      .then((result) => {
+        setState(idle());
+        onSuccess(result);
+      })
+      .catch((error: unknown) => {
+        setState({ status: "error", message: errorMessage(error) });
+      });
+  };
+
+  const analyzeAnother = () => {
+    onClear();
+    setState(idle());
+    setFileName(null);
+    setPayload(null);
+    resetInputValue();
+    requestAnimationFrame(() => {
+      inputRef.current?.focus();
+    });
+  };
+
+  return (
+    <article
+      id="analyze-file"
+      className="get-started-card"
+      aria-labelledby="get-started-file-title"
+      tabIndex={-1}
+    >
+      <h3 id="get-started-file-title">CloudTrail file</h3>
+      <p>Analyze a CloudTrail JSON or gzipped JSON export.</p>
+      {analysis ? (
+        <AnalysisCompletePanel
+          result={analysis}
+          sourceKind="file"
+          queueCount={queueCount}
+          analyzeAnotherLabel="Scan another file"
+          onOpenInvestigation={onOpenInvestigation}
+          onAnalyzeAnother={analyzeAnother}
+        />
+      ) : !available ? (
+        <p className="get-started-card__unavailable">
+          {unavailableReason ?? "File analysis is unavailable on this API instance."}
+        </p>
+      ) : (
+        <>
+          <label className="field-label" htmlFor="cloudtrail-file-input">
+            Evidence file (JSON or .gz, up to 10 MiB)
+          </label>
+          <input
+            id="cloudtrail-file-input"
+            ref={inputRef}
+            className="file-input"
+            type="file"
+            accept=".json,.gz,application/json,application/gzip"
+            onChange={(event) => chooseFile(event.target.files?.[0])}
+          />
+          {fileName ? (
+            <p className="field-hint selected-file-row">
+              <span>Selected: {fileName}</span>
+              <button
+                type="button"
+                className="selected-file-remove"
+                aria-label="Remove selected file"
+                onClick={removeFile}
+              >
+                Remove
+              </button>
+            </p>
+          ) : null}
+          {fileError ? (
+            <p className="field-error" role="alert">{fileError}</p>
+          ) : null}
+          {state.status === "error" ? (
+            <p className="field-error" role="alert">{state.message}</p>
+          ) : null}
+          <button
+            className="retry-button"
+            type="button"
+            disabled={!payload || state.status === "loading"}
+            onClick={analyze}
+          >
+            {state.status === "loading" ? "Analyzing…" : "Analyze file"}
+          </button>
+        </>
+      )}
+    </article>
+  );
+}
+
+function S3AnalysisCard({
+  available,
+  unavailableReason,
+  queueCount,
+  analysis,
+  onSuccess,
+  onClear,
+  onOpenInvestigation,
+}: {
+  available: boolean;
+  unavailableReason: string | null;
+  queueCount: number;
+  analysis: AnalysisResponse | null;
+  onSuccess: (result: AnalysisResponse) => void;
+  onClear: () => void;
+  onOpenInvestigation: (incidentId: string) => void;
+}) {
+  const [bucket, setBucket] = useState("");
+  const [key, setKey] = useState("");
+  const [region, setRegion] = useState("");
+  const [formError, setFormError] = useState<string | null>(null);
+  const [state, setState] = useState<Loadable<AnalysisResponse>>(idle());
+
+  const analyze = () => {
+    setFormError(null);
+    if (!bucket.trim() || !key.trim()) {
+      setFormError("Bucket and object key are both required.");
+      return;
+    }
+    setState(loading());
+    trailWeaverApi
+      .analyzeS3({
+        bucket: bucket.trim(),
+        key: key.trim(),
+        ...(region.trim() ? { region: region.trim() } : {}),
+      })
+      .then((result) => {
+        setState(idle());
+        onSuccess(result);
+      })
+      .catch((error: unknown) => {
+        setState({ status: "error", message: errorMessage(error) });
+      });
+  };
+
+  const analyzeAnother = () => {
+    onClear();
+    setState(idle());
+    requestAnimationFrame(() => {
+      document.getElementById("s3-bucket-input")?.focus();
+    });
+  };
+
+  return (
+    <article
+      id="analyze-s3"
+      className="get-started-card"
+      aria-labelledby="get-started-s3-title"
+      tabIndex={-1}
+    >
+      <h3 id="get-started-s3-title">AWS S3</h3>
+      <p>Analyze an explicit CloudTrail object with the backend&apos;s identity.</p>
+      {analysis ? (
+        <AnalysisCompletePanel
+          result={analysis}
+          sourceKind="s3"
+          queueCount={queueCount}
+          analyzeAnotherLabel="Analyze another object"
+          onOpenInvestigation={onOpenInvestigation}
+          onAnalyzeAnother={analyzeAnother}
+        />
+      ) : !available ? (
+        <p className="get-started-card__unavailable">
+          {unavailableReason ?? "S3 analysis is unavailable on this API instance."}
+        </p>
+      ) : (
+        <>
+          <label className="field-label" htmlFor="s3-bucket-input">Bucket</label>
+          <input
+            id="s3-bucket-input"
+            className="field-input"
+            type="text"
+            autoComplete="off"
+            placeholder="example-cloudtrail-bucket"
+            value={bucket}
+            onChange={(event) => setBucket(event.target.value)}
+          />
+          <label className="field-label" htmlFor="s3-key-input">Object key</label>
+          <input
+            id="s3-key-input"
+            className="field-input"
+            type="text"
+            autoComplete="off"
+            placeholder="AWSLogs/111122223333/CloudTrail/us-east-1/export.json.gz"
+            value={key}
+            onChange={(event) => setKey(event.target.value)}
+          />
+          <label className="field-label" htmlFor="s3-region-input">
+            Region <span className="field-optional">(optional)</span>
+          </label>
+          <input
+            id="s3-region-input"
+            className="field-input"
+            type="text"
+            autoComplete="off"
+            placeholder="us-east-1"
+            value={region}
+            onChange={(event) => setRegion(event.target.value)}
+          />
+          <p className="field-hint">
+            Uses the backend&apos;s AWS identity — an instance profile,
+            environment credentials, or container role. TrailWeaver never asks
+            for access keys.
+          </p>
+          {formError ? (
+            <p className="field-error" role="alert">{formError}</p>
+          ) : null}
+          {state.status === "error" ? (
+            <p className="field-error" role="alert">{state.message}</p>
+          ) : null}
+          <button
+            className="retry-button"
+            type="button"
+            disabled={state.status === "loading"}
+            onClick={analyze}
+          >
+            {state.status === "loading" ? "Analyzing…" : "Analyze S3 object"}
+          </button>
+        </>
+      )}
+    </article>
+  );
+}
+
+function GetStartedPanels({
+  capabilities,
+  queueCount,
+  latestAnalysis,
+  scannerResetToken,
+  onAnalysisComplete,
+  onClearAnalysis,
+  onDemoReset,
+  onOpenInvestigation,
+}: {
+  capabilities: Loadable<CapabilitiesResponse>;
+  queueCount: number;
+  latestAnalysis: LatestAnalysis | null;
+  scannerResetToken: number;
+  onAnalysisComplete: (result: AnalysisResponse, source: "file" | "s3") => void;
+  onClearAnalysis: () => void;
+  onDemoReset: () => void;
+  onOpenInvestigation: (incidentId: string) => void;
+}) {
+  const fileAvailable =
+    capabilities.status === "success" && capabilities.data.file_analysis;
+  const s3Available =
+    capabilities.status === "success" && capabilities.data.s3_analysis;
+  const demoMode =
+    capabilities.status === "success" && capabilities.data.demo_mode;
+  const pendingReason =
+    capabilities.status === "loading" || capabilities.status === "idle"
+      ? "Checking availability…"
+      : capabilities.status === "error"
+        ? `Availability could not be confirmed: ${capabilities.message}`
+        : null;
+  const s3UnavailableReason =
+    !s3Available && demoMode
+      ? "S3 analysis is unavailable in the local demo."
+      : pendingReason;
+  const [resetState, setResetState] = useState<Loadable<never>>(idle());
+
+  const resetDemo = () => {
+    setResetState(loading());
+    trailWeaverApi
+      .resetDemo()
+      .then(() => {
+        setResetState(idle());
+        onDemoReset();
+      })
+      .catch((error: unknown) => {
+        setResetState({ status: "error", message: errorMessage(error) });
+      });
+  };
+
+  return (
+    <section className="get-started" aria-labelledby="get-started-title">
+      <h2 id="get-started-title">Start an investigation</h2>
+      <p>
+        Supply CloudTrail evidence to analyze. Persisted incidents appear in
+        the incident queue and the Incidents list — open any incident to
+        investigate it.
+      </p>
+      <div className="get-started-grid">
+        <FileAnalysisCard
+          available={fileAvailable}
+          unavailableReason={pendingReason}
+          queueCount={queueCount}
+          analysis={latestAnalysis?.source === "file" ? latestAnalysis.result : null}
+          onSuccess={(result) => onAnalysisComplete(result, "file")}
+          onClear={onClearAnalysis}
+          resetToken={scannerResetToken}
+          onOpenInvestigation={onOpenInvestigation}
+        />
+        <S3AnalysisCard
+          available={s3Available}
+          unavailableReason={s3UnavailableReason}
+          queueCount={queueCount}
+          analysis={latestAnalysis?.source === "s3" ? latestAnalysis.result : null}
+          onSuccess={(result) => onAnalysisComplete(result, "s3")}
+          onClear={onClearAnalysis}
+          onOpenInvestigation={onOpenInvestigation}
+        />
+      </div>
+      {demoMode ? (
+        <div className="demo-reset">
+          <button
+            className="analysis-complete__secondary"
+            type="button"
+            disabled={resetState.status === "loading"}
+            onClick={resetDemo}
+          >
+            {resetState.status === "loading" ? "Resetting…" : "Reset demo"}
+          </button>
+          <span>
+            Clears the local demo workspace so the fixture can be analyzed again.
+          </span>
+          {resetState.status === "error" ? (
+            <p className="field-error" role="alert">{resetState.message}</p>
+          ) : null}
+        </div>
+      ) : null}
+      <p
+        className="workflow-short"
+        aria-label="Short product workflow: CloudTrail, detection, correlation, incident, investigation"
+      >
+        CloudTrail → Detection → Correlation → Incident → Investigation
+      </p>
+    </section>
+  );
+}
+
+function ZeroIncidentPanel({
+  capabilities,
+  latestAnalysis,
+  scannerResetToken,
+  onAnalysisComplete,
+  onClearAnalysis,
+  onDemoReset,
+  onOpenInvestigation,
+}: {
+  capabilities: Loadable<CapabilitiesResponse>;
+  latestAnalysis: LatestAnalysis | null;
+  scannerResetToken: number;
+  onAnalysisComplete: (result: AnalysisResponse, source: "file" | "s3") => void;
+  onClearAnalysis: () => void;
+  onDemoReset: () => void;
+  onOpenInvestigation: (incidentId: string) => void;
+}) {
+  const workspaceReady =
+    capabilities.status === "success" &&
+    (capabilities.data.file_analysis || capabilities.data.s3_analysis);
+  const workspaceStatus =
+    capabilities.status === "loading" || capabilities.status === "idle"
+      ? "Checking analysis access"
+      : capabilities.status === "error"
+        ? "Analysis access unavailable"
+        : workspaceReady
+          ? "Ready for evidence"
+          : "Analysis unavailable";
+
+  return (
+    <div className="investigation-flow">
+      <OverviewHero />
+
+      <section className="workspace-state" aria-labelledby="workspace-state-title">
+        <div className="workspace-state__heading">
+          <p>Current workspace</p>
+          <span className={workspaceReady ? "workspace-state__ready" : ""}>
+            <i />{workspaceStatus}
+          </span>
+        </div>
+        <div className="workspace-state__body">
+          <span className="workspace-state__icon"><Icon name="shield" /></span>
+          <div>
+            <h2 id="workspace-state-title">No investigations yet</h2>
+            <p>
+              Analyze CloudTrail evidence to begin. A quiet workspace means no
+              supported incident has been created here; it is not a statement
+              about the safety of an AWS account.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <GetStartedPanels
+        capabilities={capabilities}
+        queueCount={0}
+        latestAnalysis={latestAnalysis}
+        scannerResetToken={scannerResetToken}
+        onAnalysisComplete={onAnalysisComplete}
+        onClearAnalysis={onClearAnalysis}
+        onDemoReset={onDemoReset}
+        onOpenInvestigation={onOpenInvestigation}
+      />
+
+      <section className="zero-workflow" aria-labelledby="zero-evidence-title">
+        <h2 id="zero-evidence-title">What TrailWeaver accepts</h2>
+        <ul className="evidence-inputs">
+          <li>
+            <strong>CloudTrail file.</strong> A JSON export with a top-level{" "}
+            <code>{"{\"Records\": [...]}"}</code> envelope. Gzipped JSON is accepted
+            and uploads are limited to 10 MiB.
+          </li>
+          <li>
+            <strong>AWS S3 object.</strong> An explicit bucket and object key,
+            read with the backend&apos;s AWS identity — an instance profile,
+            environment credentials, or container role. TrailWeaver never asks
+            for access keys.
+          </li>
+          <li>
+            <strong>Deterministic demo.</strong> A fictional
+            account-compromise scenario served with{" "}
+            <code>uvicorn trailweaver.api.demo:app --reload</code>. It is
+            clearly labelled demo data and never real AWS evidence.
+          </li>
+        </ul>
+        <p className="zero-cli">
+          Prefer the terminal? The same pipeline runs through{" "}
+          <code>trailweaver analyze-file export.json</code> and{" "}
+          <code>trailweaver serve --host 127.0.0.1 --port 8000</code>.
+        </p>
+      </section>
+
+      <section className="zero-workflow" aria-labelledby="zero-workflow-title">
+        <h2 id="zero-workflow-title">How an investigation is produced</h2>
+        <WorkflowStrip />
+      </section>
+    </div>
+  );
+}
+
+function OverviewView({
+  incidentCount,
+  detail,
+  risk,
+  mitre,
+  sortedTimeline,
+  selectedSummary,
+  capabilities,
+  latestAnalysis,
+  scannerResetToken,
+  onOpenInvestigation,
+  onAnalysisComplete,
+  onClearAnalysis,
+  onDemoReset,
+  onOpenIncident,
+}: {
+  incidentCount: number;
+  detail: Loadable<IncidentDetail>;
+  risk: Loadable<RiskResponse>;
+  mitre: Loadable<MitreResponse>;
+  sortedTimeline: IncidentDetail["timeline"];
+  selectedSummary: IncidentSummary | undefined;
+  capabilities: Loadable<CapabilitiesResponse>;
+  latestAnalysis: LatestAnalysis | null;
+  scannerResetToken: number;
+  onOpenInvestigation: () => void;
+  onAnalysisComplete: (result: AnalysisResponse, source: "file" | "s3") => void;
+  onClearAnalysis: () => void;
+  onDemoReset: () => void;
+  onOpenIncident: (incidentId: string) => void;
+}) {
+  const featuredTitle =
+    detail.status === "success"
+      ? detail.data.title
+      : (selectedSummary?.title ?? "Incident details");
+  const techniques = mitre.status === "success" ? mitre.data.techniques : [];
+  const tactics = mitre.status === "success" ? mitre.data.tactics : [];
+
+  return (
+    <div className="investigation-flow">
+      <OverviewHero
+        populated={selectedSummary != null}
+        onOpenInvestigation={onOpenInvestigation}
+      />
+
+      <div className="metrics" aria-label="Investigation summary">
+        <MetricCard
+          icon="incident"
+          label="Incidents"
+          value={String(incidentCount)}
+          detail={incidentCount === 1 ? "Correlated case" : "Correlated cases"}
+        />
+        <MetricCard
+          icon="shield"
+          label="Featured risk"
+          value={risk.status === "success" ? `${risk.data.score} / 100` : "Unavailable"}
+          detail={risk.status === "success" ? titleCase(risk.data.level) : undefined}
+          tone={risk.status === "success" && risk.data.level === "critical" ? "critical" : "neutral"}
+          loading={risk.status === "loading"}
+        />
+        <MetricCard
+          icon="signal"
+          label="Correlated signals"
+          value={detail.status === "success" ? String(detail.data.timeline.length) : "Unavailable"}
+          detail="Observed sequence"
+          loading={detail.status === "loading"}
+        />
+        <MetricCard
+          icon="attack"
+          label="ATT&CK techniques"
+          value={mitre.status === "success" ? String(techniques.length) : "Unavailable"}
+          detail={mitre.status === "success" ? `${tactics.length} ${tactics.length === 1 ? "tactic" : "tactics"}` : undefined}
+          loading={mitre.status === "loading"}
+        />
+      </div>
+
+      {selectedSummary ? (
+      <section
+        id="featured-investigation"
+        className="featured-panel"
+        aria-labelledby="featured-title"
+      >
+        <p className="featured-panel__kicker">Featured investigation</p>
+        <div className="featured-panel__top">
+          <h2 id="featured-title">{featuredTitle}</h2>
+          {selectedSummary ? <SeverityBadge value={selectedSummary.severity} /> : null}
+        </div>
+        <div className="incident-metadata">
+          <span>
+            <Icon name="identity" />
+            {detail.status === "success"
+              ? actorLabel(detail.data)
+              : detail.status === "loading"
+                ? "Actor loading"
+                : "Actor unavailable"}
+          </span>
+          <span>
+            <Icon name="signal" />
+            {detail.status === "success"
+              ? `${formatDateTime(detail.data.started_at)} – ${formatDateTime(detail.data.ended_at)}`
+              : detail.status === "loading"
+                ? "Time range loading"
+                : "Time range unavailable"}
+          </span>
+        </div>
+
+        {detail.status === "loading" ? <PanelSkeleton rows={3} /> : null}
+        {detail.status === "error" ? (
+          <PanelError
+            title="Featured investigation unavailable"
+            message={detail.message}
+          />
+        ) : null}
+        {detail.status === "success" && sortedTimeline.length > 0 ? (
+          <ol className="evidence-steps" aria-label="Observed evidence sequence">
+            {sortedTimeline.map((entry, index) => (
+              <li key={entry.signal_id}>
+                <span className="evidence-steps__number" aria-hidden="true">{index + 1}</span>
+                <span className="evidence-steps__body">
+                  <strong>{entry.title}</strong>
+                  <time dateTime={entry.timestamp}>{formatTime(entry.timestamp)}</time>
+                </span>
+              </li>
+            ))}
+          </ol>
+        ) : null}
+        {mitre.status === "success" && techniques.length > 0 ? (
+          <ul className="tag-chips" aria-label="Observed MITRE ATT&CK techniques">
+            {techniques.map((technique) => (
+              <li key={technique.technique_id}>
+                <strong>{technique.technique_id}</strong> {technique.name}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+
+        <div className="featured-panel__actions">
+          <button className="retry-button" type="button" onClick={onOpenInvestigation}>
+            Open investigation
+          </button>
+        </div>
+      </section>
+      ) : null}
+
+      <WelcomeCard />
+
+      <GetStartedPanels
+        capabilities={capabilities}
+        queueCount={incidentCount}
+        latestAnalysis={latestAnalysis}
+        scannerResetToken={scannerResetToken}
+        onAnalysisComplete={onAnalysisComplete}
+        onClearAnalysis={onClearAnalysis}
+        onDemoReset={onDemoReset}
+        onOpenInvestigation={onOpenIncident}
+      />
+
+      <section className="zero-workflow" aria-labelledby="overview-workflow-title">
+        <h2 id="overview-workflow-title">How an investigation is produced</h2>
+        <WorkflowStrip />
+      </section>
+    </div>
+  );
+}
+
+function IncidentsView({
+  incidents,
+  selectedIncidentId,
+  onOpenInvestigation,
+  onGoOverview,
+}: {
+  incidents: IncidentSummary[];
+  selectedIncidentId: string | null;
+  onOpenInvestigation: (incidentId: string) => void;
+  onGoOverview: () => void;
+}) {
+  return (
+    <div className="investigation-flow">
+      <section className="overview-hero" aria-labelledby="incidents-title">
+        <p className="overview-hero__kicker">TrailWeaver · Incidents</p>
+        <h1 id="incidents-title">Incidents</h1>
+        <p>
+          Correlated cases from CloudTrail evidence. Opening a case selects
+          it and enters its investigation.
+        </p>
+      </section>
+
+      {incidents.length === 0 ? (
+        <section className="empty-workspace" aria-labelledby="incidents-empty-title">
+          <span className="empty-workspace__icon"><Icon name="incident" /></span>
+          <p className="empty-workspace__kicker">Incident queue</p>
+          <h1 id="incidents-empty-title">No incidents yet</h1>
+          <p>
+            Analyze CloudTrail evidence on the Overview to produce the first
+            correlated case. A quiet queue means no supported incident has
+            been created here; it is not a statement about the safety of an
+            AWS account.
+          </p>
+          <button
+            className="retry-button"
+            type="button"
+            onClick={onGoOverview}
+          >
+            Go to analysis
+          </button>
+        </section>
+      ) : (
+      <ul className="incident-cards">
+        {incidents.map((incident) => {
+          const selected = incident.incident_id === selectedIncidentId;
+          return (
+            <li
+              key={incident.incident_id}
+              className={selected ? "incident-card incident-card--selected" : "incident-card"}
+            >
+              <div className="incident-card__top">
+                <SeverityBadge value={incident.severity} />
+                {selected ? <span className="incident-card__selected">Selected</span> : null}
+              </div>
+              <h2>{incident.title}</h2>
+              <p className="incident-card__id">{incident.incident_id}</p>
+              <p className="incident-card__time">
+                <time dateTime={incident.started_at}>{formatDateTime(incident.started_at)}</time>
+                {" – "}
+                <time dateTime={incident.ended_at}>{formatDateTime(incident.ended_at)}</time>
+              </p>
+              <div className="incident-card__actions">
+                <button
+                  type="button"
+                  onClick={() => onOpenInvestigation(incident.incident_id)}
+                >
+                  Open investigation
+                </button>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+      )}
+    </div>
+  );
+}
+
+function HistoryView({
+  incidents,
+  clearedAt,
+  onClearHistory,
+  onOpenInvestigation,
+  onGoOverview,
+}: {
+  incidents: IncidentSummary[];
+  clearedAt: string | null;
+  onClearHistory: () => void;
+  onOpenInvestigation: (incidentId: string) => void;
+  onGoOverview: () => void;
+}) {
+  const recent = incidents.filter((incident) =>
+    isRecentInvestigation(incident.created_at, clearedAt),
+  );
+  const [confirming, setConfirming] = useState(false);
+
+  const confirmClear = () => {
+    setConfirming(false);
+    onClearHistory();
+  };
+
+  return (
+    <div className="investigation-flow">
+      <section className="overview-hero" aria-labelledby="history-title">
+        <p className="overview-hero__kicker">TrailWeaver · History</p>
+        <div className="history-head">
+          <div>
+            <h1 id="history-title">Recent Investigations</h1>
+            <p>Investigations created in the past 24 hours.</p>
+          </div>
+          {recent.length > 0 && !confirming ? (
+            <button
+              type="button"
+              className="analysis-complete__secondary"
+              onClick={() => setConfirming(true)}
+            >
+              Clear history
+            </button>
+          ) : null}
+        </div>
+        {confirming ? (
+          <div
+            className="history-confirm"
+            role="group"
+            aria-label="Confirm clearing recent history"
+          >
+            <p><strong>Clear recent history?</strong></p>
+            <p>
+              This only clears the recent History view. Your saved
+              investigations are not deleted.
+            </p>
+            <div className="history-confirm__actions">
+              <button type="button" onClick={() => setConfirming(false)}>
+                Cancel
+              </button>
+              <button type="button" onClick={confirmClear}>
+                Clear history
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </section>
+
+      {recent.length === 0 ? (
+        <section className="empty-workspace" aria-labelledby="history-empty-title">
+          <span className="empty-workspace__icon"><Icon name="history" /></span>
+          <p className="empty-workspace__kicker">Recent history</p>
+          <h1 id="history-empty-title">No investigations in your recent history.</h1>
+          <p>
+            History shows persisted investigations created in the past 24
+            hours. Older investigations stay saved and remain available from
+            the incident queue.
+          </p>
+          <button
+            className="retry-button"
+            type="button"
+            onClick={onGoOverview}
+          >
+            Analyze CloudTrail
+          </button>
+        </section>
+      ) : (
+      <ul className="incident-cards">
+        {recent.map((incident) => (
+          <li key={incident.incident_id} className="incident-card">
+            <div className="incident-card__top">
+              <SeverityBadge value={incident.severity} />
+            </div>
+            <h2>{incident.title}</h2>
+            <p className="incident-card__id">{incident.incident_id}</p>
+            <p className="incident-card__time">
+              Created <time dateTime={incident.created_at}>{formatDateTime(incident.created_at)}</time>
+            </p>
+            <div className="incident-card__actions">
+              <button
+                type="button"
+                onClick={() => onOpenInvestigation(incident.incident_id)}
+              >
+                Open investigation
+              </button>
+            </div>
+          </li>
+        ))}
+      </ul>
+      )}
+    </div>
+  );
+}
+
 export function InvestigationDashboard() {
   const [incidents, setIncidents] = useState<Loadable<IncidentSummary[]>>(loading());
   const [selectedIncidentId, setSelectedIncidentId] = useState<string | null>(null);
@@ -196,8 +1629,19 @@ export function InvestigationDashboard() {
   const [blastRadius, setBlastRadius] = useState<Loadable<BlastRadiusResponse>>(idle());
   const [guidance, setGuidance] = useState<Loadable<GuidanceResponse>>(idle());
   const [graph, setGraph] = useState<Loadable<GraphResponse>>(idle());
-  const [activeView, setActiveView] = useState<"overview" | "graph">("overview");
+  const [route, setRoute] = useState<Route>(
+    () => parseRouteHash(window.location.hash) ?? readStoredRoute() ?? "overview",
+  );
+  const [capabilities, setCapabilities] =
+    useState<Loadable<CapabilitiesResponse>>(loading());
   const [backendStatus, setBackendStatus] = useState<BackendStatus>("checking");
+  const [latestAnalysis, setLatestAnalysis] = useState<LatestAnalysis | null>(null);
+  const [scannerEpoch, setScannerEpoch] = useState(0);
+  const [historyClearedAt, setHistoryClearedAt] = useState<string | null>(
+    () => readHistoryClearedAt(),
+  );
+  const incidentsLoadedRef = useRef(false);
+  const capabilitiesLoadedRef = useRef(false);
   const [listReload, setListReload] = useState(0);
   const [detailReload, setDetailReload] = useState(0);
   const [riskReload, setRiskReload] = useState(0);
@@ -208,8 +1652,13 @@ export function InvestigationDashboard() {
 
   useEffect(() => {
     const controller = new AbortController();
-    setIncidents(loading());
-    setBackendStatus("checking");
+    // Background queue reloads must never unmount the workspace: the
+    // latest analysis result lives above this fetch, and the loading splash
+    // replaces the whole app. Only the initial mount uses the splash.
+    if (!incidentsLoadedRef.current) {
+      setIncidents(loading());
+      setBackendStatus("checking");
+    }
 
     trailWeaverApi
       .health(controller.signal)
@@ -223,23 +1672,84 @@ export function InvestigationDashboard() {
     trailWeaverApi
       .listIncidents(controller.signal)
       .then((items) => {
+        incidentsLoadedRef.current = true;
         setIncidents({ status: "success", data: items });
         setSelectedIncidentId((current) => {
           if (current && items.some((item) => item.incident_id === current)) {
             return current;
           }
-          return items[0]?.incident_id ?? null;
+          return items[items.length - 1]?.incident_id ?? null;
         });
       })
       .catch((error: unknown) => {
         if (!(error instanceof Error && error.name === "AbortError")) {
-          setIncidents({ status: "error", message: errorMessage(error) });
-          setSelectedIncidentId(null);
+          incidentsLoadedRef.current = true;
+          setBackendStatus("offline");
+          // A background refresh failure keeps previously loaded data on
+          // screen instead of tearing down the workspace (and any visible
+          // analysis result) with the full error state.
+          setIncidents((previous) =>
+            previous.status === "success"
+              ? previous
+              : { status: "error", message: errorMessage(error) },
+          );
         }
       });
 
     return () => controller.abort();
   }, [listReload]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    // Same stale-while-revalidate treatment as the queue: a capabilities
+    // refresh must not flip the analysis cards to "Checking availability…"
+    // while a result is on screen.
+    if (!capabilitiesLoadedRef.current) {
+      setCapabilities(loading());
+    }
+
+    trailWeaverApi
+      .capabilities(controller.signal)
+      .then((data) => {
+        capabilitiesLoadedRef.current = true;
+        setCapabilities({ status: "success", data });
+      })
+      .catch((error: unknown) => {
+        if (!(error instanceof Error && error.name === "AbortError")) {
+          capabilitiesLoadedRef.current = true;
+          setCapabilities((previous) =>
+            previous.status === "success"
+              ? previous
+              : { status: "error", message: errorMessage(error) },
+          );
+        }
+      });
+
+    return () => controller.abort();
+  }, [listReload]);
+
+  useEffect(() => {
+    // Canonicalize the URL on load so refresh never leaves URL and UI disagreeing.
+    if (parseRouteHash(window.location.hash) === null) {
+      const fallback = readStoredRoute() ?? "overview";
+      window.location.replace(ROUTE_HASHES[fallback]);
+      setRoute(fallback);
+      return;
+    }
+
+    const onHashChange = () => {
+      const parsed = parseRouteHash(window.location.hash);
+      if (parsed === null) return;
+      setRoute(parsed);
+      try {
+        window.sessionStorage.setItem(ROUTE_STORAGE_KEY, parsed);
+      } catch {
+        // Route persistence is best-effort when storage is unavailable.
+      }
+    };
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
 
   useEffect(() => {
     if (!selectedIncidentId) {
@@ -377,6 +1887,9 @@ export function InvestigationDashboard() {
     return orderTimelineEntries(detail.data.timeline);
   }, [detail]);
 
+  const demoMode =
+    capabilities.status === "success" && capabilities.data.demo_mode;
+
   const assetCounts = useMemo(() => {
     if (
       blastRadius.status !== "success" ||
@@ -391,22 +1904,131 @@ export function InvestigationDashboard() {
     return [...counts.entries()].sort(([left], [right]) => left.localeCompare(right));
   }, [blastRadius]);
 
-  const returnToOverview = (hash: string) => {
-    setActiveView("overview");
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        document.querySelector(hash)?.scrollIntoView({
-          behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
-            ? "auto"
-            : "smooth",
-          block: "start",
-        });
+  const scrollWorkspaceTop = () => {
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    window.scrollTo({ top: 0, behavior: reduced ? "auto" : "smooth" });
+  };
+
+  const applyRoute = (next: Route) => {
+    setRoute(next);
+    try {
+      window.sessionStorage.setItem(ROUTE_STORAGE_KEY, next);
+    } catch {
+      // Route persistence is best-effort when storage is unavailable.
+    }
+  };
+
+  const navigate = (hash: string) => {
+    const parsed = parseRouteHash(hash);
+    if (window.location.hash === hash) {
+      if (parsed !== null) applyRoute(parsed);
+    } else {
+      // The hashchange listener applies the route; in-page anchors are ignored.
+      window.location.hash = hash;
+    }
+    scrollWorkspaceTop();
+  };
+
+  const openInvestigation = (incidentId: string) => {
+    // Opening an investigation ends the latest-result lifecycle: the analyst
+    // has moved from the analysis outcome to the investigation itself.
+    setLatestAnalysis(null);
+    setSelectedIncidentId(incidentId);
+    navigate(ROUTE_HASHES.investigation);
+  };
+
+  const closeInvestigation = () => {
+    // Navigation and transient UI state only: the selection is dropped, any
+    // lingering analysis result is cleared, and the file scanner is asked
+    // back to its initial state. Persisted incidents, the queue, SQLite,
+    // backend state, and AWS are all untouched — the incident stays
+    // reopenable from the queue.
+    setSelectedIncidentId(null);
+    setLatestAnalysis(null);
+    setScannerEpoch((value) => value + 1);
+    navigate(ROUTE_HASHES.overview);
+  };
+
+  const handleAnalysisComplete = (result: AnalysisResponse, source: "file" | "s3") => {
+    // The completed analysis result is lifted above the queue reload, so the
+    // background refresh below can never unmount or hide it. The result stays
+    // on screen until another analysis replaces it, the analyst clears it, or
+    // an investigation is opened.
+    setLatestAnalysis({ source, result });
+    setListReload((value) => value + 1);
+  };
+
+  const handleClearAnalysis = () => {
+    setLatestAnalysis(null);
+  };
+
+  const handleClearHistory = () => {
+    // UI dismissal only: currently visible History entries are hidden behind
+    // a session-level watermark. Persisted incidents, the queue, SQLite, and
+    // backend state are untouched, and later investigations still appear.
+    // A queue refresh cannot restore dismissed entries because the filter
+    // applies at render time.
+    const now = new Date().toISOString();
+    try {
+      window.sessionStorage.setItem(HISTORY_CLEARED_STORAGE_KEY, now);
+    } catch {
+      // The watermark is best-effort when storage is unavailable.
+    }
+    setHistoryClearedAt(now);
+  };
+
+  const handleDemoReset = () => {
+    // Resetting the demo workspace ends any latest-result lifecycle and
+    // drops the incident selection so the workspace returns to its clean
+    // initial state; the queue reload below repopulates the empty overview.
+    setLatestAnalysis(null);
+    setSelectedIncidentId(null);
+    setListReload((value) => value + 1);
+  };
+
+  const [clearConfirming, setClearConfirming] = useState(false);
+  const [clearState, setClearState] = useState<Loadable<never>>(idle());
+
+  const cancelClearWorkspace = () => {
+    setClearConfirming(false);
+    setClearState(idle());
+  };
+
+  const confirmClearWorkspace = () => {
+    setClearState(loading());
+    trailWeaverApi
+      .clearWorkspace()
+      .then(() => {
+        // Only erase UI state after the backend confirms: selection and the
+        // latest result are dropped, the queue reloads, and an investigation
+        // route steps back to the overview so no stale data stays on screen.
+        setClearConfirming(false);
+        setClearState(idle());
+        setLatestAnalysis(null);
+        setSelectedIncidentId(null);
+        if (route === "investigation" || route === "graph") {
+          navigate(ROUTE_HASHES.overview);
+        }
+        setListReload((value) => value + 1);
+      })
+      .catch((error: unknown) => {
+        setClearState({ status: "error", message: errorMessage(error) });
       });
-    });
+  };
+
+  const returnToOverview = (sectionId: string) => {
+    // Section navigation stays inside the current unified investigation.
+    // It never writes location.hash, so the route, selection, and
+    // graph/replay state remain coherent.
+    scrollToInvestigationSection(sectionId);
   };
 
   const viewTimelineSignal = (signalId: string) => {
-    setActiveView("overview");
+    // Signal-ID linkage: the exact observed evidence, not timestamp matching.
+    // Stays on the unified investigation page; never navigates away.
+    if (route !== "investigation" && route !== "graph") {
+      navigate(ROUTE_HASHES.investigation);
+    }
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         const entry = document.getElementById(timelineAnchorId(signalId));
@@ -420,6 +2042,17 @@ export function InvestigationDashboard() {
       });
     });
   };
+
+  // Compatibility: the legacy #/investigation/graph route renders the same
+  // unified page and focuses the reconstruction section once it exists.
+  useEffect(() => {
+    if (route !== "graph" || !selectedIncidentId) return;
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        scrollToInvestigationSection(INVESTIGATION_SECTIONS.reconstruction);
+      });
+    });
+  }, [route, selectedIncidentId]);
 
   if (incidents.status === "loading") {
     return (
@@ -441,7 +2074,7 @@ export function InvestigationDashboard() {
 
   return (
     <div className="app-shell">
-      <a className="skip-link" href="#workspace-content">Skip to investigation</a>
+      <a className="skip-link" href="#workspace-content">Skip to content</a>
       <aside className="sidebar" aria-label="TrailWeaver navigation">
         <div className="brand">
           <span className="brand__mark" aria-hidden="true"><i /><i /><i /></span>
@@ -449,21 +2082,60 @@ export function InvestigationDashboard() {
         </div>
 
         <nav className="primary-nav" aria-label="Primary navigation">
-          <a href="#overview"><Icon name="overview" />Overview</a>
-          <a className="primary-nav__item--active" href="#timeline" aria-current="page">
+          <button
+            type="button"
+            className={route === "overview" ? "primary-nav__item--active" : undefined}
+            aria-current={route === "overview" ? "page" : undefined}
+            onClick={() => navigate(ROUTE_HASHES.overview)}
+          >
+            <Icon name="overview" />Overview
+          </button>
+          <button
+            type="button"
+            className={route === "incidents" ? "primary-nav__item--active" : undefined}
+            aria-current={route === "incidents" ? "page" : undefined}
+            onClick={() => navigate(ROUTE_HASHES.incidents)}
+          >
             <Icon name="incident" />Incidents
-          </a>
-          <a href="#guidance"><Icon name="search" />Investigations</a>
-          <a href="#blast"><Icon name="cloud" />Cloud Context</a>
-          <button type="button" disabled aria-label="Settings, unavailable in milestone 16">
-            <Icon name="settings" />Settings
+          </button>
+          <button
+            type="button"
+            className={route === "history" ? "primary-nav__item--active" : undefined}
+            aria-current={route === "history" ? "page" : undefined}
+            onClick={() => navigate(ROUTE_HASHES.history)}
+          >
+            <Icon name="history" />History
+          </button>
+          <button
+            type="button"
+            className={
+              route === "investigation" || route === "graph"
+                ? "primary-nav__item--active"
+                : undefined
+            }
+            aria-current={
+              route === "investigation" || route === "graph" ? "page" : undefined
+            }
+            onClick={() => navigate(ROUTE_HASHES.investigation)}
+          >
+            <Icon name="search" />Investigation
           </button>
         </nav>
 
         <section className="incident-queue" aria-labelledby="incident-queue-title">
           <div className="incident-queue__header">
-            <h2 id="incident-queue-title">Incident queue</h2>
-            {incidents.status === "success" ? <span>{incidents.data.length}</span> : null}
+            <h2 id="incident-queue-title">Incidents</h2>
+            <div className="incident-queue__actions">
+              {incidents.status === "success" ? <span>{incidents.data.length}</span> : null}
+              <button
+                type="button"
+                className="queue-reload"
+                onClick={() => setListReload((value) => value + 1)}
+                aria-label="Reload incident queue"
+              >
+                Reload
+              </button>
+            </div>
           </div>
           {incidents.status === "error" ? (
             <div className="sidebar-error">
@@ -489,8 +2161,9 @@ export function InvestigationDashboard() {
                     type="button"
                     key={incident.incident_id}
                     className={selected ? "incident-option incident-option--selected" : "incident-option"}
-                    aria-pressed={selected}
-                    onClick={() => setSelectedIncidentId(incident.incident_id)}
+                    aria-current={selected || undefined}
+                    aria-label={`${selected ? "Selected: " : "Open investigation: "}${incident.title}`}
+                    onClick={() => openInvestigation(incident.incident_id)}
                   >
                     <span className="incident-option__topline">
                       <SeverityBadge value={incident.severity} />
@@ -501,6 +2174,57 @@ export function InvestigationDashboard() {
                   </button>
                 );
               })}
+            </div>
+          ) : null}
+          {!demoMode && incidents.status !== "error" ? (
+            <div className="queue-clear">
+              {clearConfirming ? (
+                <div
+                  className="queue-clear__confirm"
+                  role="group"
+                  aria-label="Confirm clearing the investigation workspace"
+                  tabIndex={-1}
+                  ref={(node) => node?.focus()}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") cancelClearWorkspace();
+                  }}
+                >
+                  <p><strong>Clear investigation workspace?</strong></p>
+                  <p>
+                    This removes TrailWeaver&apos;s persisted incidents and
+                    investigation state. It does not delete your original
+                    CloudTrail files or anything from AWS.
+                  </p>
+                  {clearState.status === "error" ? (
+                    <p className="queue-clear__error" role="alert">{clearState.message}</p>
+                  ) : null}
+                  <div className="queue-clear__actions">
+                    <button type="button" onClick={cancelClearWorkspace}>
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="queue-clear__confirm-button"
+                      disabled={clearState.status === "loading"}
+                      onClick={confirmClearWorkspace}
+                    >
+                      {clearState.status === "loading"
+                        ? "Clearing…"
+                        : clearState.status === "error"
+                          ? "Retry clearing"
+                          : "Clear workspace"}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  className="queue-clear__trigger"
+                  onClick={() => setClearConfirming(true)}
+                >
+                  Clear workspace
+                </button>
+              )}
             </div>
           ) : null}
         </section>
@@ -514,7 +2238,17 @@ export function InvestigationDashboard() {
       <main className="workspace" id="workspace-content" tabIndex={-1}>
         <header className="workspace-toolbar">
           <nav className="breadcrumb" aria-label="Breadcrumb">
-            <span>Incidents</span><b aria-hidden="true">/</b>{selectedIncidentId ?? "No selection"}
+            {route === "overview" ? (
+              <span>Overview</span>
+            ) : route === "incidents" ? (
+              <span>Incidents</span>
+            ) : route === "history" ? (
+              <span>History</span>
+            ) : (
+              <>
+                <span>Investigation</span><b aria-hidden="true">/</b>{selectedIncidentId ?? "No selection"}
+              </>
+            )}
           </nav>
           <div
             className={`backend-status backend-status--${backendStatus}`}
@@ -526,16 +2260,47 @@ export function InvestigationDashboard() {
           </div>
         </header>
 
-        {incidents.status === "success" && incidents.data.length === 0 ? (
-          <section className="empty-workspace">
-            <span className="empty-workspace__icon"><Icon name="shield" /></span>
-            <p className="empty-workspace__kicker">Investigation workspace</p>
-            <h1>No correlated incidents to investigate</h1>
-            <p>
-              TrailWeaver is connected to <code>{apiBaseUrl}</code>. Once the security engine
-              produces an incident, its deterministic timeline and analyses will appear here.
-            </p>
-          </section>
+        {incidents.status === "success" && incidents.data.length === 0 && route === "overview" ? (
+          <ZeroIncidentPanel
+            capabilities={capabilities}
+            latestAnalysis={latestAnalysis}
+            scannerResetToken={scannerEpoch}
+            onAnalysisComplete={handleAnalysisComplete}
+            onClearAnalysis={handleClearAnalysis}
+            onDemoReset={handleDemoReset}
+            onOpenInvestigation={openInvestigation}
+          />
+        ) : null}
+
+        {incidents.status === "success" && incidents.data.length === 0 && route === "incidents" ? (
+          <IncidentsView
+            incidents={[]}
+            selectedIncidentId={null}
+            onOpenInvestigation={(incidentId) => openInvestigation(incidentId)}
+            onGoOverview={() => navigate(ROUTE_HASHES.overview)}
+          />
+        ) : null}
+
+        {incidents.status === "success" && incidents.data.length === 0 && (route === "investigation" || route === "graph") ? (
+          <div className="investigation-flow">
+            <section className="empty-workspace" aria-labelledby="no-analysis-title">
+              <span className="empty-workspace__icon"><Icon name="incident" /></span>
+              <p className="empty-workspace__kicker">Investigation</p>
+              <h1 id="no-analysis-title">No investigations yet</h1>
+              <p>
+                Analyze CloudTrail evidence on the Overview first. Timeline,
+                risk, MITRE ATT&amp;CK, attack graph, replay, blast radius,
+                and guidance appear here once a correlated incident exists.
+              </p>
+              <button
+                className="retry-button"
+                type="button"
+                onClick={() => navigate(ROUTE_HASHES.overview)}
+              >
+                Go to analysis
+              </button>
+            </section>
+          </div>
         ) : null}
 
         {incidents.status === "error" ? (
@@ -554,107 +2319,87 @@ export function InvestigationDashboard() {
           </section>
         ) : null}
 
-        {selectedIncidentId ? (
-          activeView === "graph" ? (
-            <div className="investigation-flow">
-              <section
-                className="investigation-section incident-section"
-                id="overview"
-                aria-labelledby="incident-title"
-                tabIndex={-1}
-              >
-                <header className="incident-header">
-                  <p className="incident-header__lead">Investigating</p>
-                  <h1 id="incident-title">
-                    {detail.status === "success" ? detail.data.title : selectedSummary?.title ?? "Incident details"}
-                  </h1>
-                  <div className="incident-metadata">
-                    <span><Icon name="incident" />{selectedIncidentId}</span>
-                    <span>
-                      <Icon name="identity" />
-                      {detail.status === "success"
-                        ? actorLabel(detail.data)
-                        : detail.status === "loading"
-                          ? "Actor loading"
-                          : "Actor unavailable"}
-                    </span>
-                    <span>
-                      <Icon name="signal" />
-                      {detail.status === "success"
-                        ? `${formatDateTime(detail.data.started_at)} – ${formatDateTime(detail.data.ended_at)}`
-                        : detail.status === "loading"
-                          ? "Time range loading"
-                          : "Time range unavailable"}
-                    </span>
-                  </div>
-                </header>
+        {incidents.status === "success" && incidents.data.length > 0 && route === "overview" ? (
+          <OverviewView
+            incidentCount={incidents.data.length}
+            detail={detail}
+            risk={risk}
+            mitre={mitre}
+            sortedTimeline={sortedTimeline}
+            selectedSummary={selectedSummary}
+            capabilities={capabilities}
+            latestAnalysis={latestAnalysis}
+            scannerResetToken={scannerEpoch}
+            onOpenInvestigation={() => {
+              if (selectedIncidentId) openInvestigation(selectedIncidentId);
+            }}
+            onAnalysisComplete={handleAnalysisComplete}
+            onClearAnalysis={handleClearAnalysis}
+            onDemoReset={handleDemoReset}
+            onOpenIncident={(incidentId) => openInvestigation(incidentId)}
+          />
+        ) : null}
 
-                <nav className="section-nav" aria-label="Investigation sections">
-                  <button type="button" onClick={() => returnToOverview("#overview")}>Incident</button>
-                  <button type="button" onClick={() => returnToOverview("#timeline")}>Timeline</button>
-                  <button type="button" onClick={() => returnToOverview("#analysis")}>Risk + ATT&amp;CK</button>
-                  <button type="button" disabled aria-current="page" className="section-nav__active">
-                    Graph
-                  </button>
-                  <button type="button" onClick={() => returnToOverview("#blast")}>Potential impact</button>
-                  <button type="button" onClick={() => returnToOverview("#guidance")}>Guidance</button>
-                </nav>
-              </section>
+        {incidents.status === "success" && route === "history" ? (
+          <HistoryView
+            incidents={incidents.data}
+            clearedAt={historyClearedAt}
+            onClearHistory={handleClearHistory}
+            onOpenInvestigation={(incidentId) => openInvestigation(incidentId)}
+            onGoOverview={() => navigate(ROUTE_HASHES.overview)}
+          />
+        ) : null}
 
-              <section
-                className="investigation-section graph-section"
-                id="graph"
-                aria-labelledby="graph-title"
-                tabIndex={-1}
+        {incidents.status === "success" && incidents.data.length > 0 && route === "incidents" ? (
+          <IncidentsView
+            incidents={incidents.data}
+            selectedIncidentId={selectedIncidentId}
+            onOpenInvestigation={(incidentId) => openInvestigation(incidentId)}
+            onGoOverview={() => navigate(ROUTE_HASHES.overview)}
+          />
+        ) : null}
+
+        {incidents.status === "success" && incidents.data.length > 0 && (route === "investigation" || route === "graph") && !selectedIncidentId ? (
+          <div className="investigation-flow">
+            <section className="empty-workspace" aria-labelledby="select-incident-title">
+              <span className="empty-workspace__icon"><Icon name="incident" /></span>
+              <p className="empty-workspace__kicker">Investigation</p>
+              <h1 id="select-incident-title">Select an incident to investigate</h1>
+              <p>
+                Timeline, risk, MITRE ATT&amp;CK, attack graph, replay, blast
+                radius, and guidance are available once an incident is selected.
+              </p>
+              <button
+                className="retry-button"
+                type="button"
+                onClick={() => navigate(ROUTE_HASHES.incidents)}
               >
-                <SectionHeading
-                  id="graph-title"
-                  title="Attack graph"
-                  description="Inspect the complete observed graph or reconstruct how linked relationships appeared through time. Potential reachability lives under Potential impact — never in this graph or replay."
-                />
-                {graph.status === "loading" ? (
-                  <div className="graph-workspace graph-workspace--state" role="status" aria-label="Loading attack graph" aria-busy="true" aria-live="polite">
-                    <PanelSkeleton rows={5} />
-                  </div>
-                ) : null}
-                {graph.status === "error" ? (
-                  <div className="graph-workspace graph-workspace--state">
-                    <PanelError
-                      title="Attack graph unavailable"
-                      message={graph.message}
-                      onRetry={() => setGraphReload((value) => value + 1)}
-                    />
-                  </div>
-                ) : null}
-                {graph.status === "success" && graph.data.nodes.length === 0 ? (
-                  <div className="graph-workspace graph-workspace--state">
-                    <div className="dark-empty">
-                      <Icon name="attack" />
-                      <p>No observed relationships were reconstructed for this incident. Nothing was invented to fill the gap.</p>
-                    </div>
-                  </div>
-                ) : null}
-                {graph.status === "success" && graph.data.nodes.length > 0 ? (
-                  <AttackGraphView
-                    key={selectedIncidentId}
-                    graph={graph.data}
-                    timeline={sortedTimeline}
-                    onViewTimeline={viewTimelineSignal}
-                  />
-                ) : null}
-              </section>
-            </div>
-          ) : (
+                Go to incidents
+              </button>
+            </section>
+          </div>
+        ) : null}
+
+        {incidents.status === "success" && incidents.data.length > 0 && (route === "investigation" || route === "graph") && selectedIncidentId ? (
           <>
             <div className="investigation-flow">
               <section
                 className="investigation-section incident-section"
-                id="overview"
+                id={INVESTIGATION_SECTIONS.overview}
                 aria-labelledby="incident-title"
                 tabIndex={-1}
               >
                 <header className="incident-header">
-                  <p className="incident-header__lead">Investigating</p>
+                  <div className="incident-header__top">
+                    <p className="incident-header__lead">Investigating</p>
+                    <button
+                      type="button"
+                      className="analysis-complete__secondary"
+                      onClick={closeInvestigation}
+                    >
+                      Close investigation
+                    </button>
+                  </div>
                   <h1 id="incident-title">
                     {detail.status === "success" ? detail.data.title : selectedSummary?.title ?? "Incident details"}
                   </h1>
@@ -726,23 +2471,18 @@ export function InvestigationDashboard() {
                 </div>
 
                 <nav className="section-nav" aria-label="Investigation sections">
-                  <a href="#overview">Incident</a>
-                  <a href="#timeline">Timeline</a>
-                  <a href="#analysis">Risk + ATT&amp;CK</a>
-                  <button
-                    type="button"
-                    onClick={() => setActiveView("graph")}
-                    aria-label="Open the observed attack graph investigation view"
-                  >
-                    Graph
-                  </button>
-                  <a href="#blast">Potential impact</a>
-                  <a href="#guidance">Guidance</a>
+                  <button type="button" onClick={() => returnToOverview(INVESTIGATION_SECTIONS.overview)}>Overview</button>
+                  <button type="button" onClick={() => returnToOverview(INVESTIGATION_SECTIONS.timeline)}>Timeline</button>
+                  <button type="button" onClick={() => returnToOverview(INVESTIGATION_SECTIONS.analysis)}>Risk + ATT&amp;CK</button>
+                  <button type="button" onClick={() => returnToOverview(INVESTIGATION_SECTIONS.reconstruction)}>Graph + Replay</button>
+                  <button type="button" onClick={() => returnToOverview(INVESTIGATION_SECTIONS.blast)}>Potential impact</button>
+                  <button type="button" onClick={() => returnToOverview(INVESTIGATION_SECTIONS.guidance)}>Guidance</button>
                 </nav>
+              </section>
 
               <section
-                className="timeline-panel"
-                id="timeline"
+                className="investigation-section timeline-panel"
+                id={INVESTIGATION_SECTIONS.timeline}
                 aria-labelledby="timeline-title"
                 tabIndex={-1}
               >
@@ -796,11 +2536,10 @@ export function InvestigationDashboard() {
                   ) : null}
                 </div>
               </section>
-              </section>
 
               <section
                 className="investigation-section meaning-section"
-                id="analysis"
+                id={INVESTIGATION_SECTIONS.analysis}
                 aria-labelledby="meaning-title"
                 tabIndex={-1}
               >
@@ -882,8 +2621,51 @@ export function InvestigationDashboard() {
               </section>
 
               <section
+                className="investigation-section reconstruction-section"
+                id={INVESTIGATION_SECTIONS.reconstruction}
+                aria-labelledby="reconstruction-title"
+                tabIndex={-1}
+              >
+                <SectionHeading
+                  id="reconstruction-title"
+                  title="Attack reconstruction"
+                  description="Observed relationships reconstructed from this incident's evidence. The full graph shows everything observed; replay reveals the same observed evidence chronologically. Potential reachability lives under Potential impact — never in this graph or replay."
+                />
+                {graph.status === "loading" ? (
+                  <div className="graph-workspace graph-workspace--state" role="status" aria-label="Loading attack graph" aria-busy="true" aria-live="polite">
+                    <PanelSkeleton rows={5} />
+                  </div>
+                ) : null}
+                {graph.status === "error" ? (
+                  <div className="graph-workspace graph-workspace--state">
+                    <PanelError
+                      title="Attack graph unavailable"
+                      message={graph.message}
+                      onRetry={() => setGraphReload((value) => value + 1)}
+                    />
+                  </div>
+                ) : null}
+                {graph.status === "success" && graph.data.nodes.length === 0 ? (
+                  <div className="graph-workspace graph-workspace--state">
+                    <div className="dark-empty">
+                      <Icon name="attack" />
+                      <p>No observed relationships were reconstructed for this incident. Nothing was invented to fill the gap.</p>
+                    </div>
+                  </div>
+                ) : null}
+                {graph.status === "success" && graph.data.nodes.length > 0 ? (
+                  <AttackGraphView
+                    key={selectedIncidentId}
+                    graph={graph.data}
+                    timeline={sortedTimeline}
+                    onViewTimeline={viewTimelineSignal}
+                  />
+                ) : null}
+              </section>
+
+              <section
                 className="investigation-section impact-section"
-                id="blast"
+                id={INVESTIGATION_SECTIONS.blast}
                 aria-labelledby="impact-title"
                 tabIndex={-1}
               >
@@ -942,7 +2724,7 @@ export function InvestigationDashboard() {
 
               <section
                 className="investigation-section guidance-section"
-                id="guidance"
+                id={INVESTIGATION_SECTIONS.guidance}
                 aria-labelledby="guidance-title"
                 tabIndex={-1}
               >
@@ -974,7 +2756,6 @@ export function InvestigationDashboard() {
               </section>
             </div>
           </>
-          )
         ) : null}
       </main>
     </div>

@@ -4,8 +4,9 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Literal, TypeAlias
 
-from pydantic import BaseModel, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from trailweaver.api.execution import InvestigationExecutionResult
 from trailweaver.attack_graph import AttackGraph
 from trailweaver.blast_radius import BlastRadiusResult
 from trailweaver.incidents import Incident
@@ -29,6 +30,7 @@ class IncidentSummaryResponse(BaseModel):
     incident_id: str
     title: str
     severity: str
+    created_at: datetime
     started_at: datetime
     ended_at: datetime
 
@@ -40,6 +42,7 @@ class IncidentSummaryResponse(BaseModel):
             incident_id=incident.incident_id,
             title=incident.title,
             severity=incident.severity.value,
+            created_at=incident.created_at,
             started_at=incident.started_at,
             ended_at=incident.ended_at,
         )
@@ -373,3 +376,108 @@ def _json_value(value: object) -> ApiJsonValue:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return [_json_value(item) for item in value]
     raise TypeError(f"Unsupported API metadata value: {type(value).__name__}")
+
+
+class CapabilitiesResponse(BaseModel):
+    """Web-analysis capabilities of this API instance."""
+
+    file_analysis: bool
+    s3_analysis: bool
+    demo_mode: bool = False
+
+
+class S3AnalysisRequest(BaseModel):
+    """Explicit S3 CloudTrail object to analyze.
+
+    Authentication always uses the backend's boto3 provider chain; this
+    request carries no AWS credentials and any extra fields are rejected.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    bucket: str = Field(min_length=1, max_length=253)
+    key: str = Field(min_length=1, max_length=1024)
+    version_id: str | None = Field(default=None, max_length=256)
+    region: str | None = Field(default=None, max_length=64)
+    source_label: str | None = Field(default=None, max_length=256)
+
+
+class IngestionIssueResponse(BaseModel):
+    """One safe per-record diagnostic from an analysis operation."""
+
+    record_index: int
+    code: str
+    event_id: str | None = None
+
+
+class AnalysisResponse(BaseModel):
+    """Safe stage counts for one completed web analysis operation.
+
+    Raw CloudTrail events are never included; only counts, stable issue
+    diagnostics, and the identifiers of persisted incidents are exposed.
+    """
+
+    source_label: str | None = None
+    total_records: int
+    accepted_records: int
+    failed_records: int
+    duplicate_records: int
+    events_analyzed: int
+    signals: int
+    correlations: int
+    incidents_created: int
+    persisted_incidents: int
+    incident_ids: list[str]
+    issues: list[IngestionIssueResponse]
+
+    @classmethod
+    def from_result(cls, result: InvestigationExecutionResult) -> "AnalysisResponse":
+        """Convert a pipeline result to safe response counts."""
+
+        ingestion = result.ingestion_result
+        return cls(
+            source_label=ingestion.source_label,
+            total_records=ingestion.total_records,
+            accepted_records=ingestion.accepted_records,
+            failed_records=ingestion.failed_records,
+            duplicate_records=ingestion.duplicate_records,
+            events_analyzed=result.analyzed_event_count,
+            signals=result.signal_count,
+            correlations=result.correlation_count,
+            incidents_created=result.incident_count,
+            persisted_incidents=result.persisted_incident_count,
+            incident_ids=[
+                incident.incident_id for incident in result.persisted_incidents
+            ],
+            issues=[
+                IngestionIssueResponse(
+                    record_index=issue.record_index,
+                    code=issue.code.value,
+                    event_id=issue.event_id,
+                )
+                for issue in ingestion.issues
+            ],
+        )
+
+
+class DemoResetResponse(BaseModel):
+    """Result of resetting the local demo workspace.
+
+    Only served by the opt-in demo application; the production API never
+    exposes a reset capability.
+    """
+
+    status: Literal["ok"]
+    incidents: int
+
+
+class ClearWorkspaceResponse(BaseModel):
+    """Result of clearing the current TrailWeaver investigation workspace.
+
+    Only persisted incidents and their related investigation rows are
+    removed. Source files, AWS resources, and the database file itself are
+    never affected.
+    """
+
+    status: Literal["ok"]
+    incidents: int

@@ -168,6 +168,25 @@ class SQLiteIncidentRepository:
         except (sqlite3.Error, TypeError, ValueError) as error:
             raise IncidentRepositoryError("Unable to save incident") from error
 
+    def clear_incidents(self) -> None:
+        """Remove every persisted incident and its related rows atomically.
+
+        Deleting from ``incidents`` cascades to ``correlation_matches`` and
+        ``signals`` through the schema's foreign keys, so no orphaned rows
+        can remain. The database file, schema version, and sequence metadata
+        are left untouched; the single statement runs in one transaction, so
+        a failure cannot leave a partial deletion behind.
+        """
+
+        try:
+            with closing(self._connect()) as connection, connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute("DELETE FROM incidents")
+        except sqlite3.Error as error:
+            raise IncidentRepositoryError(
+                "Unable to clear persisted incidents"
+            ) from error
+
     def check_health(self) -> None:
         """Verify SQLite connectivity and schema version without loading evidence."""
 

@@ -6,6 +6,7 @@ export type IconName =
   | "attack"
   | "cloud"
   | "database"
+  | "history"
   | "identity"
   | "incident"
   | "key"
@@ -28,6 +29,7 @@ const paths: Record<IconName, ReactNode> = {
   attack: <path d="M7 17 17 7M8 7h9v9M5 5l4 1M5 5l1 4M19 19l-4-1m4 1-1-4" />,
   cloud: <path d="M7 18h10a4 4 0 0 0 .7-7.94A6 6 0 0 0 6.3 8.4 4.8 4.8 0 0 0 7 18Z" />,
   database: <path d="M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3Zm0 0v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6m-16 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6" />,
+  history: <path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Zm0-13v5l3.5 2" />,
   identity: <path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm7 8a7 7 0 0 0-14 0" />,
   incident: <path d="M12 3 4 6v6c0 4.4 3.1 7.7 8 9 4.9-1.3 8-4.6 8-9V6l-8-3Zm0 5v5m0 3h.01" />,
   key: <path d="M14 10a4 4 0 1 0-3.4 3.76L12 15h2v2h2v2h3v-3l-5-6Z" />,

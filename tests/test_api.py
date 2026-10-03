@@ -321,6 +321,7 @@ def test_incident_list_returns_only_compact_summary_data() -> None:
             "incident_id": "incident-1",
             "title": "Possible AWS account compromise",
             "severity": "high",
+            "created_at": "2026-09-23T10:50:00Z",
             "started_at": "2026-09-23T10:30:00Z",
             "ended_at": "2026-09-23T10:40:00Z",
         }
