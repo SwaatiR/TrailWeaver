@@ -319,7 +319,8 @@ Sample CloudTrail exports for local analysis live in `samples/cloudtrail/`.
 
 The `trailweaver` console command is a thin adapter over the ingestion and
 investigation application services. It analyzes one local export, analyzes one
-explicitly named S3 object, or serves the existing read-only API:
+explicitly named S3 object, analyzes a bounded S3 prefix selection, or serves
+the existing read-only API:
 
 ```bash
 trailweaver --database ~/.local/share/trailweaver/incidents.sqlite3 \
@@ -329,6 +330,11 @@ trailweaver --database ~/.local/share/trailweaver/incidents.sqlite3 \
   analyze-s3 --bucket example-cloudtrail-bucket \
   --key AWSLogs/111122223333/CloudTrail/us-east-1/export.json.gz \
   --region us-east-1
+
+trailweaver --database ~/.local/share/trailweaver/incidents.sqlite3 \
+  analyze-s3-prefix --bucket example-cloudtrail-bucket \
+  --prefix AWSLogs/111122223333/CloudTrail/us-east-1/2026/09/23/ \
+  --max-objects 10
 
 trailweaver --database ~/.local/share/trailweaver/incidents.sqlite3 \
   serve --host 127.0.0.1 --port 8000
@@ -344,6 +350,7 @@ Runtime environment variables use the `TRAILWEAVER_` prefix:
 
 - `TRAILWEAVER_DATABASE_PATH`
 - `TRAILWEAVER_AWS_REGION`
+- `TRAILWEAVER_S3_MAX_OBJECTS` (default prefix selection bound, 1-1000)
 - `TRAILWEAVER_API_HOST`
 - `TRAILWEAVER_API_PORT`
 - `TRAILWEAVER_CORS_ORIGINS` as a comma-separated explicit list
@@ -569,9 +576,22 @@ correlation, or incident identity. The default logical source label is the S3 UR
 callers may supply a less revealing label.
 
 Explicit prefix listing is available and handles S3 pagination, but requires a non-empty
-prefix and only returns metadata. It never automatically ingests every listed object.
+prefix and only returns metadata. Listing alone never ingests objects; the bounded
+`analyze-s3-prefix` flow below is the explicit opt-in for multi-object analysis.
 There is no bucket discovery, live polling, queues, event notifications, processed-file
 tracking, or changes to CloudTrail source data.
+
+Bounded S3 prefix analysis (`POST /api/v1/analyses/s3-prefix` or
+`trailweaver analyze-s3-prefix --bucket ... --prefix ...`) selects at most
+`max_objects` objects (default 100, hard maximum 1000, configurable default via
+`TRAILWEAVER_S3_MAX_OBJECTS`), orders them by key, and analyzes them sequentially,
+one ordinary per-object AnalysisRun each. Object-level source failures are recorded
+as safe per-object outcomes while later objects continue; listing or internal
+persistence failures abort. Duplicate events across objects are recognized through
+the existing event ledger, cross-object signals correlate through the existing
+signal history, and replaying a prefix creates new runs without duplicate identified
+incidents. Zero matching objects is a successful empty result. No batch state is
+persisted and the SQLite schema is unchanged.
 
 ### Web analysis from the dashboard
 
@@ -592,8 +612,10 @@ deterministic demo API disables S3 analysis while retaining the file-upload work
 Analysis responses contain safe run identity and timing, stage counts, safe per-record
 diagnostics, and persisted incident IDs — never raw CloudTrail events.
 
-Reprocessing is **not idempotent**: analyzing the same source again creates
-a separate, independently identified incident.
+Reprocessing identified evidence does not duplicate durable output: already-processed
+events are skipped and already-emitted correlation evidence is recognized, so only
+genuinely new evidence creates new incidents. Evidence without a trustworthy event
+ID is always reprocessed.
 
 Analysts can return the workspace to a fresh state with the sidebar's
 "Clear workspace" action (with confirmation) or `POST /api/v1/workspace/clear`.
@@ -705,8 +727,10 @@ contain `raw_event`.
 Back up `/data/incidents.sqlite3` consistently before infrastructure changes and test
 restoration. EFS durability is not a substitute for application-level backup, and
 SQLite remains a single-instance/single-writer design for portfolio-scale operation.
-Repeated source analysis remains non-idempotent because signal, correlation, and
-incident IDs are generated per execution; no file/ETag processing ledger is implied.
+Repeated analysis reuses persistent event and signal history: identified evidence
+creates no duplicate durable output, while new random domain IDs (signals,
+correlations, incidents) still identify each fresh execution's own objects; no
+file/ETag processing ledger is implied.
 The final CI matrix also formats and validates Terraform with its backend disabled.
 
 ## Dashboard behavior and limits

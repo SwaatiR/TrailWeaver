@@ -21,6 +21,7 @@ class RuntimeConfig:
     api_port: int = 8000
     cors_origins: tuple[str, ...] = ("http://localhost:5173",)
     log_level: str = "info"
+    s3_max_objects: int = 100
 
     @classmethod
     def from_environment(
@@ -54,6 +55,9 @@ class RuntimeConfig:
             api_port=port,
             cors_origins=origins,
             log_level=log_level,
+            s3_max_objects=_parse_s3_max_objects(
+                values.get("TRAILWEAVER_S3_MAX_OBJECTS", "100")
+            ),
         )
 
 
@@ -76,6 +80,26 @@ def _parse_port(value: str) -> int:
             "TRAILWEAVER_API_PORT must be between 1 and 65535"
         )
     return port
+
+
+def _parse_s3_max_objects(value: str) -> int:
+    """Validate the default S3 prefix selection bound.
+
+    The public hard maximum stays 1000 regardless of environment
+    configuration; larger configured values are rejected, never clamped.
+    """
+
+    try:
+        max_objects = int(value.strip())
+    except ValueError as error:
+        raise RuntimeConfigurationError(
+            "TRAILWEAVER_S3_MAX_OBJECTS must be an integer"
+        ) from error
+    if not 1 <= max_objects <= 1000:
+        raise RuntimeConfigurationError(
+            "TRAILWEAVER_S3_MAX_OBJECTS must be between 1 and 1000"
+        )
+    return max_objects
 
 
 def _parse_origins(value: str) -> tuple[str, ...]:

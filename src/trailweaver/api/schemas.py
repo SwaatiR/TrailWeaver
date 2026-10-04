@@ -8,6 +8,11 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from trailweaver.api.execution import InvestigationExecutionResult
 from trailweaver.attack_graph import AttackGraph
+from trailweaver.aws_s3 import (
+    DEFAULT_S3_PREFIX_MAX_OBJECTS,
+    MAX_S3_PREFIX_MAX_OBJECTS,
+    S3PrefixAnalysis,
+)
 from trailweaver.blast_radius import BlastRadiusResult
 from trailweaver.incidents import Incident
 from trailweaver.investigation import InvestigationGuidance
@@ -384,6 +389,107 @@ class CapabilitiesResponse(BaseModel):
     file_analysis: bool
     s3_analysis: bool
     demo_mode: bool = False
+
+
+class S3PrefixAnalysisRequest(BaseModel):
+    """Bounded S3 prefix selection to analyze object by object.
+
+    Authentication always uses the backend's boto3 provider chain; this
+    request carries no AWS credentials and any extra fields are rejected.
+    Every selected object runs the existing single-object pipeline, so no
+    raw object contents ever appear in the response.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    bucket: str = Field(min_length=1, max_length=253)
+    prefix: str = Field(min_length=1, max_length=1024)
+    max_objects: int = Field(
+        default=DEFAULT_S3_PREFIX_MAX_OBJECTS,
+        ge=1,
+        le=MAX_S3_PREFIX_MAX_OBJECTS,
+    )
+    region: str | None = Field(default=None, max_length=64)
+
+
+class S3PrefixObjectOutcomeResponse(BaseModel):
+    """One safe per-object outcome of a bounded prefix analysis."""
+
+    key: str
+    status: Literal["succeeded", "failed"]
+    analysis_run_id: str | None = None
+    records_seen: int = 0
+    records_accepted: int = 0
+    signals_created: int = 0
+    correlations_created: int = 0
+    incidents_created: int = 0
+    incident_ids: list[str] = Field(default_factory=list)
+    error_category: str | None = None
+    error_message: str | None = None
+
+
+class S3PrefixAnalysisResponse(BaseModel):
+    """Ephemeral aggregate of one bounded S3 prefix analysis.
+
+    ``objects_discovered`` is the number of object summaries selected within
+    the configured bound, not total prefix cardinality. Every selected
+    object has exactly one outcome.
+    """
+
+    bucket: str
+    prefix: str
+    max_objects: int
+    objects_discovered: int
+    objects_attempted: int
+    objects_succeeded: int
+    objects_failed: int
+    analysis_run_ids: list[str]
+    incident_ids: list[str]
+    records_seen: int
+    records_accepted: int
+    signals_created: int
+    correlations_created: int
+    incidents_created: int
+    outcomes: list[S3PrefixObjectOutcomeResponse]
+
+    @classmethod
+    def from_analysis(
+        cls, analysis: S3PrefixAnalysis
+    ) -> "S3PrefixAnalysisResponse":
+        """Convert an in-memory orchestration aggregate to safe response data."""
+
+        return cls(
+            bucket=analysis.bucket,
+            prefix=analysis.prefix,
+            max_objects=analysis.max_objects,
+            objects_discovered=analysis.objects_discovered,
+            objects_attempted=analysis.objects_attempted,
+            objects_succeeded=analysis.objects_succeeded,
+            objects_failed=analysis.objects_failed,
+            analysis_run_ids=list(analysis.analysis_run_ids),
+            incident_ids=list(analysis.incident_ids),
+            records_seen=analysis.records_seen,
+            records_accepted=analysis.records_accepted,
+            signals_created=analysis.signals_created,
+            correlations_created=analysis.correlations_created,
+            incidents_created=analysis.incidents_created,
+            outcomes=[
+                S3PrefixObjectOutcomeResponse(
+                    key=outcome.key,
+                    status=outcome.status.value,
+                    analysis_run_id=outcome.analysis_run_id,
+                    records_seen=outcome.records_seen,
+                    records_accepted=outcome.records_accepted,
+                    signals_created=outcome.signals_created,
+                    correlations_created=outcome.correlations_created,
+                    incidents_created=outcome.incidents_created,
+                    incident_ids=list(outcome.incident_ids),
+                    error_category=outcome.error_category,
+                    error_message=outcome.error_message,
+                )
+                for outcome in analysis.outcomes
+            ],
+        )
 
 
 class S3AnalysisRequest(BaseModel):

@@ -45,6 +45,8 @@ from trailweaver.api.schemas import (
     MitreResponse,
     RiskResponse,
     S3AnalysisRequest,
+    S3PrefixAnalysisRequest,
+    S3PrefixAnalysisResponse,
 )
 from trailweaver.api.service import (
     IncidentAnalysisService,
@@ -478,6 +480,35 @@ def create_app(
         except CloudTrailIngestionError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
         return AnalysisResponse.from_result(result)
+
+    @application.post(
+        "/api/v1/analyses/s3-prefix",
+        response_model=S3PrefixAnalysisResponse,
+    )
+    async def analyze_s3_prefix(payload: S3PrefixAnalysisRequest) -> S3PrefixAnalysisResponse:
+        if runner is None or not enable_s3_analysis:
+            raise HTTPException(
+                status_code=503,
+                detail="S3 analysis is unavailable on this API instance",
+            )
+        bucket = payload.bucket.strip()
+        prefix = payload.prefix.strip()
+        if not bucket or not prefix:
+            raise HTTPException(
+                status_code=422,
+                detail="S3 bucket and object prefix must be non-empty",
+            )
+        factory: S3AdapterFactory = application.state.s3_adapter_factory
+        try:
+            result = factory(payload.region).analyze_prefix(
+                runner,
+                bucket=bucket,
+                prefix=prefix,
+                max_objects=payload.max_objects,
+            )
+        except S3CloudTrailSourceError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+        return S3PrefixAnalysisResponse.from_analysis(result)
 
     return application
 
