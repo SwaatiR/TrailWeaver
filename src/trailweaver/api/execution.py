@@ -2,8 +2,10 @@
 
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from os import PathLike
 
+from trailweaver.analysis_runs import AnalysisRun, AnalysisSourceType
 from trailweaver.api.service import IncidentRepository
 from trailweaver.cloudtrail_ingestion import (
     DEFAULT_MAX_SOURCE_BYTES,
@@ -27,6 +29,7 @@ _LOGGER = logging.getLogger(__name__)
 class InvestigationExecutionResult:
     """Evidence and stage outputs from one completed investigation execution."""
 
+    analysis_run: AnalysisRun
     ingestion_result: CloudTrailIngestionResult
     analyzed_events: tuple[NormalizedEvent, ...]
     signals: tuple[Signal, ...]
@@ -77,6 +80,7 @@ class InvestigationRunner:
         *,
         source_label: str | None = None,
         max_source_bytes: int = DEFAULT_MAX_SOURCE_BYTES,
+        source_type: AnalysisSourceType = AnalysisSourceType.DIRECT_INPUT,
     ) -> InvestigationExecutionResult:
         """Ingest JSON text or bytes and run the accepted events through the pipeline."""
 
@@ -85,7 +89,7 @@ class InvestigationRunner:
             source_label=source_label,
             max_source_bytes=max_source_bytes,
         )
-        return self.run_ingestion_result(ingestion_result)
+        return self.run_ingestion_result(ingestion_result, source_type=source_type)
 
     def run_cloudtrail_file(
         self,
@@ -101,14 +105,27 @@ class InvestigationRunner:
             source_label=source_label,
             max_source_bytes=max_source_bytes,
         )
-        return self.run_ingestion_result(ingestion_result)
+        return self.run_ingestion_result(
+            ingestion_result,
+            source_type=AnalysisSourceType.LOCAL_FILE,
+        )
 
     def run_ingestion_result(
-        self, ingestion_result: CloudTrailIngestionResult
+        self,
+        ingestion_result: CloudTrailIngestionResult,
+        *,
+        source_type: AnalysisSourceType = AnalysisSourceType.DIRECT_INPUT,
     ) -> InvestigationExecutionResult:
-        """Analyze and persist the accepted events from an existing M20 result."""
+        """Analyze and persist accepted events from an existing ingestion result.
 
+        Analysis-run timing begins here, after source transport and document parsing,
+        and completes only after the existing incident persistence sequence succeeds.
+        """
+
+        started_at = datetime.now(UTC)
         source = safe_source_label(ingestion_result.source_label)
+        if source is not None and not source.strip():
+            source = None
         log_event(
             _LOGGER,
             logging.INFO,
@@ -167,7 +184,20 @@ class InvestigationRunner:
             persisted=len(persisted_incidents),
         )
 
+        analysis_run = AnalysisRun(
+            source_type=source_type,
+            source_label=source,
+            started_at=started_at,
+            completed_at=datetime.now(UTC),
+            records_seen=ingestion_result.total_records,
+            records_accepted=ingestion_result.accepted_records,
+            signals_created=len(signals),
+            correlations_created=len(correlations),
+            incidents_created=len(incidents),
+        )
+
         return InvestigationExecutionResult(
+            analysis_run=analysis_run,
             ingestion_result=ingestion_result,
             analyzed_events=analyzed_events,
             signals=signals,

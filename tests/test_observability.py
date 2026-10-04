@@ -58,6 +58,7 @@ def test_investigation_logs_safe_stage_counts_without_raw_evidence() -> None:
     assert records[1]["signals"] == result.signal_count == 3
     assert records[1]["correlations"] == result.correlation_count == 1
     assert records[2]["persisted"] == 1
+    assert result.analysis_run.source_label == "account-compromise.json"
     assert "requestParameters" not in stream.getvalue()
     assert "raw_event" not in stream.getvalue()
 

@@ -2,6 +2,7 @@ import json
 from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import pytest
 
@@ -63,6 +64,10 @@ def test_local_attack_analysis_persists_incident_and_prints_safe_summary(
         "investigation_completed",
     ]
     assert "source records: 3" in output.getvalue()
+    run_line = next(
+        line for line in output.getvalue().splitlines() if line.startswith("analysis run: ")
+    )
+    assert UUID(run_line.removeprefix("analysis run: ")).version == 4
     assert "signals: 3" in output.getvalue()
     assert "incidents: 1" in output.getvalue()
     assert "persisted incidents: 1" in output.getvalue()
@@ -132,6 +137,10 @@ def test_s3_command_uses_injected_client_and_existing_pipeline(tmp_path: Path) -
 
     assert exit_code == 0
     assert "signals: 3" in output.getvalue()
+    run_line = next(
+        line for line in output.getvalue().splitlines() if line.startswith("analysis run: ")
+    )
+    assert UUID(run_line.removeprefix("analysis run: ")).version == 4
     assert client.calls == [
         {"Bucket": "fictional-bucket", "Key": "AWSLogs/export.json"}
     ]

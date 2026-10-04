@@ -161,6 +161,10 @@ export interface AnalysisIssue {
 }
 
 export interface AnalysisResponse {
+  analysis_run_id: string;
+  source_type: "local_file" | "web_upload" | "s3_object" | "direct_input";
+  started_at: string;
+  completed_at: string;
   source_label: string | null;
   total_records: number;
   accepted_records: number;

@@ -10,6 +10,7 @@ from typing import Any, Protocol, cast
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
+from trailweaver.analysis_runs import AnalysisSourceType
 from trailweaver.api.execution import (
     InvestigationExecutionResult,
     InvestigationRunner,
@@ -255,7 +256,10 @@ class S3CloudTrailAdapter:
             max_object_bytes=max_object_bytes,
             max_decompressed_bytes=max_decompressed_bytes,
         )
-        return runner.run_ingestion_result(ingestion_result)
+        return runner.run_ingestion_result(
+            ingestion_result,
+            source_type=AnalysisSourceType.S3_OBJECT,
+        )
 
     def list_objects(
         self,

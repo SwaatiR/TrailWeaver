@@ -411,12 +411,16 @@ class IngestionIssueResponse(BaseModel):
 
 
 class AnalysisResponse(BaseModel):
-    """Safe stage counts for one completed web analysis operation.
+    """Safe provenance and stage counts for one completed web analysis operation.
 
-    Raw CloudTrail events are never included; only counts, stable issue
-    diagnostics, and the identifiers of persisted incidents are exposed.
+    Raw CloudTrail events are never included; only run metadata, counts, stable
+    issue diagnostics, and the identifiers of persisted incidents are exposed.
     """
 
+    analysis_run_id: str
+    source_type: str
+    started_at: datetime
+    completed_at: datetime
     source_label: str | None = None
     total_records: int
     accepted_records: int
@@ -435,16 +439,21 @@ class AnalysisResponse(BaseModel):
         """Convert a pipeline result to safe response counts."""
 
         ingestion = result.ingestion_result
+        analysis_run = result.analysis_run
         return cls(
-            source_label=ingestion.source_label,
-            total_records=ingestion.total_records,
-            accepted_records=ingestion.accepted_records,
+            analysis_run_id=analysis_run.analysis_run_id,
+            source_type=analysis_run.source_type.value,
+            started_at=analysis_run.started_at,
+            completed_at=analysis_run.completed_at,
+            source_label=analysis_run.source_label,
+            total_records=analysis_run.records_seen,
+            accepted_records=analysis_run.records_accepted,
             failed_records=ingestion.failed_records,
             duplicate_records=ingestion.duplicate_records,
             events_analyzed=result.analyzed_event_count,
-            signals=result.signal_count,
-            correlations=result.correlation_count,
-            incidents_created=result.incident_count,
+            signals=analysis_run.signals_created,
+            correlations=analysis_run.correlations_created,
+            incidents_created=analysis_run.incidents_created,
             persisted_incidents=result.persisted_incident_count,
             incident_ids=[
                 incident.incident_id for incident in result.persisted_incidents

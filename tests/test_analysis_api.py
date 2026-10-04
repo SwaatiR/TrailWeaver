@@ -2,9 +2,11 @@
 
 import gzip
 from asyncio import run
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import httpx
 from botocore.exceptions import ClientError
@@ -115,6 +117,12 @@ def test_file_analysis_produces_incident() -> None:
     assert body["incidents_created"] == 1
     assert body["persisted_incidents"] == 1
     assert len(body["incident_ids"]) == 1
+    assert body["source_type"] == "web_upload"
+    assert UUID(body["analysis_run_id"]).version == 4
+    started_at = datetime.fromisoformat(body["started_at"])
+    completed_at = datetime.fromisoformat(body["completed_at"])
+    assert started_at.tzinfo is not None
+    assert completed_at >= started_at
 
     incident_id = body["incident_ids"][0]
     listed = client.get("/api/v1/incidents").json()
@@ -184,6 +192,7 @@ def test_reprocessing_same_source_creates_distinct_incident() -> None:
     assert first.status_code == 200
     assert second.status_code == 200
     assert first.json()["incident_ids"] != second.json()["incident_ids"]
+    assert first.json()["analysis_run_id"] != second.json()["analysis_run_id"]
     assert len(client.get("/api/v1/incidents").json()) == 2
 
 
@@ -260,6 +269,7 @@ def test_demo_app_rejects_s3_analysis_but_accepts_file_uploads() -> None:
     )
     assert allowed.status_code == 200
     assert allowed.json()["incidents_created"] == 0
+    assert allowed.json()["source_type"] == "web_upload"
 
 
 def test_s3_analysis_uses_injected_adapter_without_live_aws() -> None:
@@ -275,8 +285,17 @@ def test_s3_analysis_uses_injected_adapter_without_live_aws() -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["source_label"] == "s3://example-bucket/trail/export.json"
+    assert body["source_type"] == "s3_object"
     assert body["incidents_created"] == 1
     assert len(client.get("/api/v1/incidents").json()) == 1
+    for forbidden in (
+        "raw_event",
+        "requestparameters",
+        "aws_access_key_id",
+        "etag",
+        "version_id",
+    ):
+        assert forbidden not in response.text.lower()
 
 
 def test_s3_analysis_maps_source_errors_safely() -> None:

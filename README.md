@@ -467,6 +467,19 @@ continue through analysis. An accepted event that matches no detection remains a
 successfully analyzed event; a valid signal that does not complete a correlation remains
 a reported signal; and zero incidents is a successful pipeline result.
 
+Every successful normalized investigation execution also returns an immutable
+`AnalysisRun` with a unique UUID4 `analysis_run_id`, safe source type and display label,
+UTC-aware start and completion times, and stage counts. The run begins when
+`run_ingestion_result()` starts, after source transport and document parsing, and
+completes only after incident persistence succeeds. An `analysis_run_id` identifies an
+invocation, while a CloudTrail `event_id` identifies underlying event evidence: the same
+event may therefore appear in multiple distinct runs. Runs do not own incidents, contain
+raw evidence, or participate in deduplication.
+
+M29 run information exists only on the successful in-memory execution result. It is not
+stored by the in-memory or SQLite incident repositories and is lost across process
+restart; persistent run and ingestion history belongs to the later ledger milestone.
+
 Ingestion preserves source order. The runner creates a separate analysis ordering by
 event timestamp, retaining original source position for equal timestamps. Detection
 runs once per event in that order and preserves rule-pack order. The existing
@@ -528,9 +541,9 @@ two thin initiators over the same ingestion and investigation pipeline:
   any credential-like fields are rejected.
 
 `GET /api/v1/capabilities` reports whether each initiator is available; the
-deterministic demo API disables both to stay read-only. Analysis responses
-contain only stage counts, safe per-record diagnostics, and persisted
-incident IDs — never raw CloudTrail events.
+deterministic demo API disables S3 analysis while retaining the file-upload workflow.
+Analysis responses contain safe run identity and timing, stage counts, safe per-record
+diagnostics, and persisted incident IDs — never raw CloudTrail events.
 
 Reprocessing is **not idempotent**: analyzing the same source again creates
 a separate, independently identified incident.

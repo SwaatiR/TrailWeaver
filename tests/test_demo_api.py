@@ -127,6 +127,7 @@ def test_demo_fixture_analysis_produces_expected_pipeline_result() -> None:
     assert body["correlations"] == 1
     assert body["incidents_created"] == 1
     assert body["persisted_incidents"] == 1
+    assert body["source_type"] == "web_upload"
     assert len(body["incident_ids"]) == 1
 
     incident_id = body["incident_ids"][0]
@@ -194,6 +195,13 @@ def test_showcase_application_exposes_exactly_one_deterministic_incident() -> No
             "ended_at": "2026-09-23T10:08:00Z",
         }
     ]
+
+
+def test_preconstructed_demo_incident_has_no_fabricated_analysis_run() -> None:
+    incident = create_demo_incident()
+
+    assert not hasattr(incident, "analysis_run_id")
+    assert not hasattr(incident, "analysis_run")
 
 
 def test_showcase_incident_contains_three_real_detection_signals() -> None:

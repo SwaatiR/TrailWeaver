@@ -10,6 +10,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from trailweaver.analysis_runs import AnalysisRun, AnalysisSourceType
 from trailweaver.api.app import create_app
 from trailweaver.api.execution import (
     InvestigationExecutionResult,
@@ -58,6 +59,10 @@ def test_default_runner_executes_real_attack_sequence_in_memory() -> None:
     result = runner.run_cloudtrail_file(ATTACK_FIXTURE)
 
     assert isinstance(result, InvestigationExecutionResult)
+    assert isinstance(result.analysis_run, AnalysisRun)
+    assert result.analysis_run.source_type is AnalysisSourceType.LOCAL_FILE
+    assert result.analysis_run.started_at.tzinfo is not None
+    assert result.analysis_run.completed_at >= result.analysis_run.started_at
     assert result.ingestion_result.total_records == 3
     assert result.ingestion_result.accepted_records == 3
     assert result.ingestion_result.failed_records == 0
@@ -78,6 +83,11 @@ def test_default_runner_executes_real_attack_sequence_in_memory() -> None:
     assert result.incidents[0].title == "Possible AWS account compromise"
     assert result.persisted_incidents == result.incidents
     assert repository.list_incidents() == result.incidents
+    assert result.analysis_run.records_seen == 3
+    assert result.analysis_run.records_accepted == 3
+    assert result.analysis_run.signals_created == result.signal_count == 3
+    assert result.analysis_run.correlations_created == result.correlation_count == 1
+    assert result.analysis_run.incidents_created == result.incident_count == 1
 
 
 def test_existing_ingestion_result_is_preserved_and_analyzed() -> None:
@@ -91,6 +101,7 @@ def test_existing_ingestion_result_is_preserved_and_analyzed() -> None:
 
     assert result.ingestion_result is ingestion_result
     assert result.ingestion_result.source_label == "pre-ingested-upload"
+    assert result.analysis_run.source_type is AnalysisSourceType.DIRECT_INPUT
 
 
 def test_non_chronological_source_is_ordered_only_for_analysis() -> None:
@@ -159,6 +170,8 @@ def test_benign_valid_document_is_a_successful_zero_incident_execution() -> None
     assert result.incident_count == 0
     assert result.persisted_incident_count == 0
     assert repository.list_incidents() == ()
+    assert result.analysis_run.signals_created == 0
+    assert result.analysis_run.incidents_created == 0
 
 
 def test_standalone_detection_is_reported_without_manufacturing_incident() -> None:
@@ -189,6 +202,8 @@ def test_partial_ingestion_still_creates_and_persists_incident() -> None:
     assert result.signal_count == 3
     assert result.incident_count == 1
     assert repository.list_incidents() == result.incidents
+    assert result.analysis_run.records_seen == 4
+    assert result.analysis_run.records_accepted == 3
 
 
 def test_m20_duplicate_handling_is_inherited_before_analysis() -> None:
@@ -217,6 +232,33 @@ def test_document_failure_prevents_analysis_and_persistence() -> None:
     assert repository.list_incidents() == ()
 
 
+@pytest.mark.parametrize("failure_stage", ("detection", "correlation", "factory"))
+def test_analysis_stage_failures_propagate_without_completed_run(
+    failure_stage: str,
+) -> None:
+    runner = InvestigationRunner(
+        detection_engine=(
+            _FailingDetectionEngine()
+            if failure_stage == "detection"
+            else DetectionEngine(AWS_RULES)
+        ),  # type: ignore[arg-type]
+        correlation_engine=(
+            _FailingCorrelationEngine()
+            if failure_stage == "correlation"
+            else CorrelationEngine(AWS_CORRELATION_RULES)
+        ),  # type: ignore[arg-type]
+        incident_factory=(
+            _FailingIncidentFactory()
+            if failure_stage == "factory"
+            else IncidentFactory()
+        ),
+        incident_repository=InMemoryIncidentRepository(),
+    )
+
+    with pytest.raises(RuntimeError, match=f"{failure_stage} failed"):
+        runner.run_cloudtrail_file(ATTACK_FIXTURE)
+
+
 def test_reprocessing_same_source_is_not_idempotent_with_random_domain_ids() -> None:
     repository = InMemoryIncidentRepository()
     runner = create_default_investigation_runner(repository)
@@ -225,6 +267,7 @@ def test_reprocessing_same_source_is_not_idempotent_with_random_domain_ids() -> 
     second = runner.run_cloudtrail_file(ATTACK_FIXTURE)
 
     assert len(repository.list_incidents()) == 2
+    assert first.analysis_run.analysis_run_id != second.analysis_run.analysis_run_id
     assert first.incidents[0].incident_id != second.incidents[0].incident_id
     assert first.correlations[0].correlation_id != second.correlations[0].correlation_id
     assert {signal.signal_id for signal in first.signals}.isdisjoint(
@@ -233,6 +276,7 @@ def test_reprocessing_same_source_is_not_idempotent_with_random_domain_ids() -> 
     assert [event.event_id for event in first.analyzed_events] == [
         event.event_id for event in second.analyzed_events
     ]
+    assert all(event.event_id is not None for event in first.analyzed_events)
 
 
 def test_duplicate_incident_error_is_not_misclassified_as_idempotent_success() -> None:
@@ -263,6 +307,21 @@ def test_same_runner_has_in_memory_and_sqlite_repository_parity(tmp_path: Path) 
     assert memory_result.signal_count == sqlite_result.signal_count == 3
     assert memory_result.correlation_count == sqlite_result.correlation_count == 1
     assert memory_result.incident_count == sqlite_result.incident_count == 1
+    assert memory_result.analysis_run.records_seen == (
+        sqlite_result.analysis_run.records_seen
+    )
+    assert memory_result.analysis_run.records_accepted == (
+        sqlite_result.analysis_run.records_accepted
+    )
+    assert memory_result.analysis_run.signals_created == (
+        sqlite_result.analysis_run.signals_created
+    )
+    assert memory_result.analysis_run.correlations_created == (
+        sqlite_result.analysis_run.correlations_created
+    )
+    assert memory_result.analysis_run.incidents_created == (
+        sqlite_result.analysis_run.incidents_created
+    )
     assert tuple(signal.rule_id for signal in memory_result.signals) == tuple(
         signal.rule_id for signal in sqlite_result.signals
     )
@@ -284,6 +343,7 @@ def test_sqlite_reopen_and_existing_api_derive_complete_investigation(
     reopened = reopened_repository.get_incident(incident.incident_id)
     assert reopened is not None
     assert reopened.incident_id == incident.incident_id
+    assert result.analysis_run.analysis_run_id.encode() not in database.read_bytes()
     assert tuple(entry.signal_id for entry in reopened.timeline) == expected_signal_ids
     assert all(
         signal.source_event.raw_event == {}
@@ -318,6 +378,14 @@ def test_sqlite_reopen_and_existing_api_derive_complete_investigation(
     for response in (collection, detail, risk, mitre, graph, blast):
         assert "raw_event" not in response.text
 
+    assert not hasattr(reopened, "analysis_run_id")
+    assert not hasattr(reopened.correlation_match, "analysis_run_id")
+    assert all(
+        not hasattr(signal, "analysis_run_id")
+        and not hasattr(signal.source_event, "analysis_run_id")
+        for signal in reopened.correlation_match.signals
+    )
+
 
 def test_file_execution_does_not_modify_source() -> None:
     before = ATTACK_FIXTURE.read_bytes()
@@ -350,6 +418,27 @@ def test_execution_result_is_immutable() -> None:
 
     with pytest.raises(FrozenInstanceError):
         result.signals = ()  # type: ignore[misc]
+
+
+def test_empty_input_produces_completed_zero_count_local_file_run() -> None:
+    result = create_default_investigation_runner(
+        InMemoryIncidentRepository()
+    ).run_cloudtrail_file(SAMPLES / "empty-records.json")
+
+    assert result.analysis_run.source_type is AnalysisSourceType.LOCAL_FILE
+    assert result.analysis_run.records_seen == 0
+    assert result.analysis_run.records_accepted == 0
+    assert result.analysis_run.signals_created == 0
+    assert result.analysis_run.correlations_created == 0
+    assert result.analysis_run.incidents_created == 0
+
+
+def test_direct_json_execution_uses_direct_input_source_type() -> None:
+    result = create_default_investigation_runner(
+        InMemoryIncidentRepository()
+    ).run_cloudtrail_json('{"Records": []}')
+
+    assert result.analysis_run.source_type is AnalysisSourceType.DIRECT_INPUT
 
 
 def _two_actor_attack_document() -> JsonObject:
@@ -411,3 +500,25 @@ class _FixedIdentityIncidentFactory(IncidentFactory):
             incident_id="fixed-incident-id",
             created_at=created_at,
         )
+
+
+class _FailingDetectionEngine:
+    def evaluate(self, _event: object) -> tuple[()]:
+        raise RuntimeError("detection failed")
+
+
+class _FailingCorrelationEngine:
+    def evaluate(self, _signals: object) -> tuple[()]:
+        raise RuntimeError("correlation failed")
+
+
+class _FailingIncidentFactory(IncidentFactory):
+    def create(
+        self,
+        correlation_match: CorrelationMatch,
+        *,
+        incident_id: str | None = None,
+        created_at: datetime | None = None,
+    ) -> Incident:
+        del correlation_match, incident_id, created_at
+        raise RuntimeError("factory failed")

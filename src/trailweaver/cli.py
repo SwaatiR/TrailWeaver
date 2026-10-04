@@ -205,6 +205,7 @@ def _build_parser(config: RuntimeConfig) -> argparse.ArgumentParser:
 def _print_summary(result: InvestigationExecutionResult, output: TextIO) -> None:
     ingestion = result.ingestion_result
     lines = (
+        ("analysis run", result.analysis_run.analysis_run_id),
         ("source records", ingestion.total_records),
         ("accepted", ingestion.accepted_records),
         ("failed", ingestion.failed_records),

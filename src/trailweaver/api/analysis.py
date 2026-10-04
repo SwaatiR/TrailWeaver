@@ -12,6 +12,7 @@ import zlib
 from collections.abc import Callable
 from io import BytesIO
 
+from trailweaver.analysis_runs import AnalysisSourceType
 from trailweaver.api.execution import (
     InvestigationExecutionResult,
     InvestigationRunner,
@@ -88,6 +89,7 @@ def analyze_uploaded_bytes(
         content,
         source_label=label,
         max_source_bytes=max_source_bytes,
+        source_type=AnalysisSourceType.WEB_UPLOAD,
     )
 
 
