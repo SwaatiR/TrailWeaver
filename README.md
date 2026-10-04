@@ -478,8 +478,8 @@ UTC-aware start and completion times, and stage counts. The run begins when
 `run_ingestion_result()` starts, after source transport and document parsing, and
 completes only after incident persistence succeeds. An `analysis_run_id` identifies an
 invocation, while a CloudTrail `event_id` identifies underlying event evidence: the same
-event may therefore appear in multiple distinct runs. Runs do not own incidents, contain
-raw evidence, or participate in deduplication.
+event may therefore appear in multiple distinct runs. Runs do not own incidents and
+contain no raw evidence.
 
 Each attempt that reaches `run_ingestion_result()` is also written to a separate
 analysis-run ledger. Its immutable snapshots move from `RUNNING` to either `COMPLETED`
@@ -492,6 +492,16 @@ SQLite retains ledger history across restarts. A process crash can intentionally
 `RUNNING` record, which is preserved as-is on reopen; automatic recovery and stale-run
 reconciliation are deferred. Clearing a workspace or resetting the demo removes
 incidents but does not delete analysis-run history.
+
+A separate event ledger provides persistent sequential idempotency over the provider
+`eventID`: an event identity successfully processed by a completed run is recognized,
+recorded as observed, and not sent through detection again by later runs. Events
+without a trustworthy ID are always reprocessed and never recorded. Identities are
+acknowledged only after successful analysis, so failed analyses remain fully
+retryable. Production workspace clearing preserves dedup history; demo reset clears
+demo dedup state so the synthetic demo replays from scratch. Concurrent
+exactly-once processing is not claimed: genuinely concurrent runs may both process
+the same event.
 
 Ingestion preserves source order. The runner creates a separate analysis ordering by
 event timestamp, retaining original source position for equal timestamps. Detection

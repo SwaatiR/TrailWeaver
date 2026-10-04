@@ -27,6 +27,11 @@ from trailweaver.cloudtrail_ingestion import (
 from trailweaver.correlation import CorrelationEngine, CorrelationMatch
 from trailweaver.correlation_rules import AWS_CORRELATION_RULES
 from trailweaver.detection import DetectionEngine
+from trailweaver.event_ledger import (
+    EventIdentity,
+    EventLedgerRepository,
+    InMemoryEventLedger,
+)
 from trailweaver.incidents import Incident, IncidentFactory
 from trailweaver.models import NormalizedEvent
 from trailweaver.observability import log_event, safe_source_label
@@ -80,6 +85,7 @@ class InvestigationRunner:
         incident_factory: IncidentFactory,
         incident_repository: IncidentRepository,
         analysis_run_repository: AnalysisRunRepository | None = None,
+        event_ledger_repository: EventLedgerRepository | None = None,
     ) -> None:
         self._detection_engine = detection_engine
         self._correlation_engine = correlation_engine
@@ -89,6 +95,11 @@ class InvestigationRunner:
             analysis_run_repository
             if analysis_run_repository is not None
             else InMemoryAnalysisRunRepository()
+        )
+        self._event_ledger_repository = (
+            event_ledger_repository
+            if event_ledger_repository is not None
+            else InMemoryEventLedger()
         )
 
     def run_cloudtrail_json(
@@ -160,6 +171,34 @@ class InvestigationRunner:
                 failure_phase=None,
             )
         )
+        # Persistent cross-run deduplication happens here, after the RUNNING
+        # row exists and before any duplicate event can create new signals.
+        # Events without a trustworthy provider ID are always processed and
+        # never recorded. A ledger read failure propagates with no FAILED
+        # row, mirroring a start_run failure: processing never began.
+        identified = tuple(
+            (event, EventIdentity.from_event(event))
+            for event in ingestion_result.events
+        )
+        observed_identities = tuple(
+            identity for _, identity in identified if identity is not None
+        )
+        known_identities = self._event_ledger_repository.known_identities(
+            observed_identities
+        )
+        processable_events = tuple(
+            event
+            for event, identity in identified
+            if identity is None or identity not in known_identities
+        )
+        events_new = sum(
+            1
+            for _, identity in identified
+            if identity is not None and identity not in known_identities
+        )
+        events_duplicate = sum(
+            1 for _, identity in identified if identity in known_identities
+        )
         log_event(
             _LOGGER,
             logging.INFO,
@@ -169,9 +208,11 @@ class InvestigationRunner:
             accepted=ingestion_result.accepted_records,
             failed=ingestion_result.failed_records,
             duplicates=ingestion_result.duplicate_records,
+            events_new=events_new,
+            events_duplicate=events_duplicate,
         )
         try:
-            analyzed_events = _order_events_for_analysis(ingestion_result.events)
+            analyzed_events = _order_events_for_analysis(processable_events)
         except Exception:
             self._record_failure(
                 analysis_run_id,
@@ -261,6 +302,16 @@ class InvestigationRunner:
             incidents_created=len(incidents),
         )
         self._analysis_run_repository.complete_run(analysis_run)
+        # Event identities are acknowledged only after successful processing:
+        # observation provenance covers every identity-bearing event this run
+        # observed, including ones already known and skipped. A failure here
+        # propagates with no successful result; persisted incidents remain and
+        # unacknowledged evidence stays retryable.
+        self._event_ledger_repository.acknowledge_run_events(
+            analysis_run_id=analysis_run_id,
+            finished_at=analysis_run.completed_at,
+            observed=observed_identities,
+        )
 
         log_event(
             _LOGGER,
@@ -268,6 +319,8 @@ class InvestigationRunner:
             "investigation_completed",
             source=source,
             persisted=len(persisted_incidents),
+            events_new=events_new,
+            events_duplicate=events_duplicate,
         )
 
         return InvestigationExecutionResult(
@@ -314,6 +367,7 @@ class InvestigationRunner:
 def create_default_investigation_runner(
     incident_repository: IncidentRepository,
     analysis_run_repository: AnalysisRunRepository | None = None,
+    event_ledger_repository: EventLedgerRepository | None = None,
 ) -> InvestigationRunner:
     """Return the canonical runner configured with TrailWeaver's AWS rule packs."""
 
@@ -326,6 +380,11 @@ def create_default_investigation_runner(
             analysis_run_repository
             if analysis_run_repository is not None
             else InMemoryAnalysisRunRepository()
+        ),
+        event_ledger_repository=(
+            event_ledger_repository
+            if event_ledger_repository is not None
+            else InMemoryEventLedger()
         ),
     )
 

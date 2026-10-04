@@ -66,6 +66,11 @@ from trailweaver.cloudtrail_ingestion import (
     CloudTrailIngestionError,
     CloudTrailSourceTooLargeError,
 )
+from trailweaver.event_ledger import (
+    EventLedgerError,
+    EventLedgerRepository,
+    InMemoryEventLedger,
+)
 from trailweaver.observability import log_event
 from trailweaver.runtime import validate_cors_origins
 
@@ -105,6 +110,7 @@ def create_app(
     cors_origins: Iterable[str] | None = None,
     analysis_runner: InvestigationRunner | None = None,
     analysis_run_repository: AnalysisRunRepository | None = None,
+    event_ledger_repository: EventLedgerRepository | None = None,
     enable_analysis: bool = True,
     enable_s3_analysis: bool = True,
     demo_mode: bool = False,
@@ -128,6 +134,15 @@ def create_app(
             else InMemoryAnalysisRunRepository()
         )
     )
+    event_ledger = (
+        event_ledger_repository
+        if event_ledger_repository is not None
+        else (
+            incident_repository
+            if isinstance(incident_repository, SQLiteIncidentRepository)
+            else InMemoryEventLedger()
+        )
+    )
     incident_service = (
         service
         if service is not None
@@ -144,6 +159,7 @@ def create_app(
             else create_default_investigation_runner(
                 incident_repository,
                 analysis_run_repository=run_repository,
+                event_ledger_repository=event_ledger,
             )
         )
     application = FastAPI(
@@ -165,6 +181,7 @@ def create_app(
     )
 
     @application.exception_handler(AnalysisRunRepositoryError)
+    @application.exception_handler(EventLedgerError)
     @application.exception_handler(IncidentRepositoryError)
     async def repository_unavailable(
         _request: Request, error: IncidentRepositoryError
@@ -329,6 +346,12 @@ def create_app(
 
             if isinstance(incident_repository, InMemoryIncidentRepository):
                 incident_repository.clear_incidents()
+                # Demo replay support: the synthetic demo must process its
+                # fixture again from scratch, so demo event-dedup state resets
+                # here too. Production workspace clearing deliberately keeps
+                # dedup history; run history is preserved in both cases.
+                if isinstance(event_ledger, InMemoryEventLedger):
+                    event_ledger.clear()
                 return DemoResetResponse(status="ok", incidents=0)
             raise HTTPException(
                 status_code=503,

@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from collections.abc import Collection
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,6 +24,10 @@ from trailweaver.analysis_runs import (
 )
 from trailweaver.api.service import IncidentAlreadyExistsError
 from trailweaver.correlation import CorrelationMatch
+from trailweaver.event_ledger import (
+    EventIdentity,
+    EventLedgerError,
+)
 from trailweaver.incidents import Incident
 from trailweaver.models import (
     Actor,
@@ -33,7 +38,35 @@ from trailweaver.models import (
 )
 from trailweaver.signals import Signal, SignalSeverity
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
+
+_EVENT_IDENTITY_CHUNK_SIZE = 500
+
+_EVENTS_TABLE_SQL = """CREATE TABLE events (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider TEXT NOT NULL CHECK (length(trim(provider)) > 0),
+    event_identity TEXT NOT NULL CHECK (length(trim(event_identity)) > 0),
+    first_seen_at TEXT NOT NULL CHECK (length(first_seen_at) > 0),
+    UNIQUE (provider, event_identity)
+)"""
+
+_RUN_EVENTS_TABLE_SQL = """CREATE TABLE analysis_run_events (
+    analysis_run_id TEXT NOT NULL
+        REFERENCES analysis_runs(analysis_run_id)
+        ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    event_identity TEXT NOT NULL,
+    PRIMARY KEY (
+        analysis_run_id,
+        provider,
+        event_identity
+    ),
+    FOREIGN KEY (
+        provider,
+        event_identity
+    )
+    REFERENCES events(provider, event_identity)
+)"""
 
 _ANALYSIS_RUNS_TABLE_SQL = """CREATE TABLE analysis_runs (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -265,6 +298,81 @@ class SQLiteIncidentRepository:
         except sqlite3.Error as error:
             raise AnalysisRunRepositoryError("Unable to list analysis runs") from error
 
+    def known_identities(
+        self, identities: Collection[EventIdentity]
+    ) -> frozenset[EventIdentity]:
+        """Return the subset already acknowledged in persistent event history."""
+
+        unique = tuple(dict.fromkeys(identities))
+        if not unique:
+            return frozenset()
+        try:
+            with closing(self._connect()) as connection:
+                stored: list[tuple[object, object]] = []
+                for offset in range(0, len(unique), _EVENT_IDENTITY_CHUNK_SIZE):
+                    chunk = unique[offset : offset + _EVENT_IDENTITY_CHUNK_SIZE]
+                    placeholders = ",".join(["(?, ?)"] * len(chunk))
+                    parameters: list[str] = []
+                    for identity in chunk:
+                        parameters.extend((identity.provider, identity.event_id))
+                    stored.extend(
+                        (row["provider"], row["event_identity"])
+                        for row in connection.execute(
+                            "SELECT provider, event_identity FROM events "
+                            f"WHERE (provider, event_identity) IN (VALUES {placeholders})",
+                            parameters,
+                        ).fetchall()
+                    )
+        except sqlite3.Error as error:
+            raise EventLedgerError("Unable to check event identities") from error
+        return frozenset(
+            EventIdentity(provider=provider, event_id=event_id)
+            for provider, event_id in stored
+        )
+
+    def acknowledge_run_events(
+        self,
+        *,
+        analysis_run_id: str,
+        finished_at: datetime,
+        observed: Collection[EventIdentity],
+    ) -> None:
+        """Atomically record one completed run's observed event identities.
+
+        Missing identities are inserted with the run's finish time; existing
+        identities keep their original first-seen time; every observed
+        identity gains its run association. The whole operation is one
+        transaction, and repeated acknowledgement is a safe no-op.
+        """
+
+        if not analysis_run_id or not analysis_run_id.strip():
+            raise ValueError("analysis_run_id must be non-empty")
+        unique = tuple(dict.fromkeys(observed))
+        if not unique:
+            return
+        finished = _datetime_to_storage(finished_at)
+        try:
+            with closing(self._connect()) as connection, connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.executemany(
+                    "INSERT OR IGNORE INTO events "
+                    "(provider, event_identity, first_seen_at) VALUES (?, ?, ?)",
+                    [
+                        (identity.provider, identity.event_id, finished)
+                        for identity in unique
+                    ],
+                )
+                connection.executemany(
+                    "INSERT OR IGNORE INTO analysis_run_events "
+                    "(analysis_run_id, provider, event_identity) VALUES (?, ?, ?)",
+                    [
+                        (analysis_run_id, identity.provider, identity.event_id)
+                        for identity in unique
+                    ],
+                )
+        except sqlite3.Error as error:
+            raise EventLedgerError("Unable to acknowledge run events") from error
+
     def get_incident(self, incident_id: str) -> Incident | None:
         """Return an incident by exact ID, or ``None`` if it is absent."""
 
@@ -413,7 +521,7 @@ class SQLiteIncidentRepository:
                 if version == _SCHEMA_VERSION:
                     connection.commit()
                     return
-                if version not in {0, 1}:
+                if version not in {0, 1, 2}:
                     raise UnsupportedSchemaVersionError(
                         f"Unsupported SQLite incident schema version {version}; "
                         f"this application supports {_SCHEMA_VERSION}"
@@ -479,7 +587,10 @@ class SQLiteIncidentRepository:
                     )
                     for statement in schema_statements:
                         connection.execute(statement)
-                connection.execute(_ANALYSIS_RUNS_TABLE_SQL)
+                if version in {0, 1}:
+                    connection.execute(_ANALYSIS_RUNS_TABLE_SQL)
+                connection.execute(_EVENTS_TABLE_SQL)
+                connection.execute(_RUN_EVENTS_TABLE_SQL)
                 connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
                 connection.commit()
         except UnsupportedSchemaVersionError:

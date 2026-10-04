@@ -98,7 +98,7 @@ def test_sqlite_clear_removes_incidents_and_related_rows_without_touching_schema
         }
     finally:
         connection.close()
-    assert version == 2
+    assert version == 3
     assert {"incidents", "correlation_matches", "signals"} <= tables
 
     repository.save_incident(create_demo_incident())
@@ -150,9 +150,12 @@ def test_production_clear_endpoint_empties_workspace_and_stays_usable(
     repeated = client.post(
         "/api/v1/analyses/file", content=payload, headers=headers
     )
+    # Workspace clear preserves dedup history, so re-analyzing the same
+    # evidence produces no new work while the workspace stays usable.
     assert repeated.status_code == 200
-    assert repeated.json()["incidents_created"] == 1
-    assert len(client.get("/api/v1/incidents").json()) == 1
+    assert repeated.json()["incidents_created"] == 0
+    assert repeated.json()["signals"] == 0
+    assert len(client.get("/api/v1/incidents").json()) == 0
 
 
 def test_production_clear_of_empty_workspace_succeeds(tmp_path: Path) -> None:

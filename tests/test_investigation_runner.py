@@ -39,6 +39,7 @@ from trailweaver.cloudtrail_ingestion import (
 from trailweaver.correlation import CorrelationEngine, CorrelationMatch
 from trailweaver.correlation_rules import AWS_CORRELATION_RULES
 from trailweaver.detection import DetectionEngine
+from trailweaver.event_ledger import EventIdentity, InMemoryEventLedger
 from trailweaver.incidents import Incident, IncidentFactory
 from trailweaver.models import JsonObject
 from trailweaver.rules import AWS_RULES
@@ -457,38 +458,53 @@ def test_same_evidence_creates_distinct_durable_run_records(tmp_path: Path) -> N
     )
 
 
-def test_reprocessing_same_source_is_not_idempotent_with_random_domain_ids() -> None:
+def test_reprocessing_same_events_on_shared_ledger_skips_duplicate_work() -> None:
     repository = InMemoryIncidentRepository()
-    runner = create_default_investigation_runner(repository)
+    ledger = InMemoryEventLedger()
+    runner = create_default_investigation_runner(
+        repository, event_ledger_repository=ledger
+    )
 
     first = runner.run_cloudtrail_file(ATTACK_FIXTURE)
     second = runner.run_cloudtrail_file(ATTACK_FIXTURE)
 
-    assert len(repository.list_incidents()) == 2
+    assert len(repository.list_incidents()) == 1
     assert first.analysis_run.analysis_run_id != second.analysis_run.analysis_run_id
-    assert first.incidents[0].incident_id != second.incidents[0].incident_id
-    assert first.correlations[0].correlation_id != second.correlations[0].correlation_id
-    assert {signal.signal_id for signal in first.signals}.isdisjoint(
-        signal.signal_id for signal in second.signals
-    )
-    assert [event.event_id for event in first.analyzed_events] == [
-        event.event_id for event in second.analyzed_events
-    ]
+    assert first.incident_count == 1
+    assert second.signal_count == 0
+    assert second.incident_count == 0
+    assert second.analyzed_event_count == 0
     assert all(event.event_id is not None for event in first.analyzed_events)
+    assert ledger.known_identities(
+        [
+            EventIdentity(provider=event.provider, event_id=event.event_id)
+            for event in first.analyzed_events
+            if event.event_id is not None
+        ]
+    ) == frozenset(
+        EventIdentity(provider=event.provider, event_id=event.event_id)
+        for event in first.analyzed_events
+        if event.event_id is not None
+    )
 
 
 def test_duplicate_incident_error_is_not_misclassified_as_idempotent_success() -> None:
     repository = InMemoryIncidentRepository()
-    runner = InvestigationRunner(
-        detection_engine=DetectionEngine(AWS_RULES),
-        correlation_engine=CorrelationEngine(AWS_CORRELATION_RULES),
-        incident_factory=_FixedIdentityIncidentFactory(),
-        incident_repository=repository,
-    )
-    runner.run_cloudtrail_file(ATTACK_FIXTURE)
+
+    def _runner() -> InvestigationRunner:
+        # Each runner owns an independent event ledger so both invocations
+        # fully process the same evidence; only incident identity collides.
+        return InvestigationRunner(
+            detection_engine=DetectionEngine(AWS_RULES),
+            correlation_engine=CorrelationEngine(AWS_CORRELATION_RULES),
+            incident_factory=_FixedIdentityIncidentFactory(),
+            incident_repository=repository,
+        )
+
+    _runner().run_cloudtrail_file(ATTACK_FIXTURE)
 
     with pytest.raises(IncidentAlreadyExistsError, match="already exists"):
-        runner.run_cloudtrail_file(ATTACK_FIXTURE)
+        _runner().run_cloudtrail_file(ATTACK_FIXTURE)
 
     assert len(repository.list_incidents()) == 1
 

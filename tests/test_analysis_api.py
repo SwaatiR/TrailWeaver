@@ -183,7 +183,7 @@ def test_partial_file_preserves_m20_diagnostics() -> None:
         assert set(issue) == {"record_index", "code", "event_id"}
 
 
-def test_reprocessing_same_source_creates_distinct_incident() -> None:
+def test_reprocessing_same_events_on_shared_ledger_skips_duplicate_work() -> None:
     client = _client()
     payload = _sample("account-compromise-sequence.json")
     headers = {"Content-Type": "application/json"}
@@ -191,9 +191,11 @@ def test_reprocessing_same_source_creates_distinct_incident() -> None:
     second = client.post("/api/v1/analyses/file", content=payload, headers=headers)
     assert first.status_code == 200
     assert second.status_code == 200
-    assert first.json()["incident_ids"] != second.json()["incident_ids"]
     assert first.json()["analysis_run_id"] != second.json()["analysis_run_id"]
-    assert len(client.get("/api/v1/incidents").json()) == 2
+    assert first.json()["incidents_created"] == 1
+    assert second.json()["incidents_created"] == 0
+    assert second.json()["signals"] == 0
+    assert len(client.get("/api/v1/incidents").json()) == 1
 
 
 def test_malformed_envelope_is_rejected_safely() -> None:

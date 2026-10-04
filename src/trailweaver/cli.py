@@ -29,6 +29,7 @@ from trailweaver.cloudtrail_ingestion import (
     DEFAULT_MAX_SOURCE_BYTES,
     CloudTrailIngestionError,
 )
+from trailweaver.event_ledger import EventLedgerError
 from trailweaver.observability import configure_logging, log_event
 from trailweaver.runtime import (
     RuntimeConfig,
@@ -73,7 +74,9 @@ def main(
         if arguments.command == "analyze-file":
             repository = SQLiteIncidentRepository(database_path)
             result = create_default_investigation_runner(
-                repository, analysis_run_repository=repository
+                repository,
+                analysis_run_repository=repository,
+                event_ledger_repository=repository,
             ).run_cloudtrail_file(
                 arguments.path,
                 source_label=arguments.source_label,
@@ -85,7 +88,9 @@ def main(
         if arguments.command == "analyze-s3":
             repository = SQLiteIncidentRepository(database_path)
             runner = create_default_investigation_runner(
-                repository, analysis_run_repository=repository
+                repository,
+                analysis_run_repository=repository,
+                event_ledger_repository=repository,
             )
             adapter = (
                 S3CloudTrailAdapter(s3_client)
@@ -130,7 +135,12 @@ def main(
         )
         print(f"Source error: {error}", file=errors)
         return EXIT_SOURCE_ERROR
-    except (AnalysisRunRepositoryError, IncidentRepositoryError, OSError) as error:
+    except (
+        AnalysisRunRepositoryError,
+        EventLedgerError,
+        IncidentRepositoryError,
+        OSError,
+    ) as error:
         log_event(
             _LOGGER,
             logging.ERROR,
