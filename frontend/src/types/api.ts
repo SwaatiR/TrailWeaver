@@ -154,6 +154,50 @@ export interface CapabilitiesResponse {
   demo_mode: boolean;
 }
 
+export interface ProvenanceSummary {
+  evidence_signal_count: number;
+  identified_event_count: number;
+  identified_events_with_recorded_observations: number;
+  unidentified_signal_count: number;
+  observing_run_count: number;
+  source_types: string[];
+  event_time_start: string | null;
+  event_time_end: string | null;
+}
+
+export interface ObservingRun {
+  analysis_run_id: string;
+  source_type: string;
+  source_label: string | null;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+}
+
+export type ObservationState =
+  | "recorded"
+  | "history_unavailable"
+  | "identity_unavailable";
+
+export interface EvidenceProvenance {
+  signal_id: string;
+  rule_id: string;
+  title: string;
+  provider: string;
+  event_id: string | null;
+  event_time: string;
+  observation_state: ObservationState;
+  first_recorded_at: string | null;
+  observed_run_ids: string[];
+}
+
+export interface IncidentProvenance {
+  incident_id: string;
+  summary: ProvenanceSummary;
+  observing_runs: ObservingRun[];
+  evidence: EvidenceProvenance[];
+}
+
 export interface AnalysisIssue {
   record_index: number;
   code: string;

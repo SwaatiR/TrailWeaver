@@ -4156,3 +4156,265 @@ p {
     display: none;
   }
 }
+
+/* Evidence provenance (M34): warm/light card language. The timeline stays
+   the dominant dark evidence surface; provenance is a supporting panel. */
+.provenance-section {
+  scroll-margin-top: 22px;
+}
+
+.provenance-panel {
+  background: var(--surface);
+}
+
+.provenance-panel > .panel-heading {
+  margin-bottom: 18px;
+}
+
+.provenance-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0 0 14px;
+  padding: 0;
+}
+
+.provenance-summary > div {
+  min-width: 0;
+  padding: 12px 14px;
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.provenance-summary dt {
+  margin-bottom: 4px;
+  color: var(--ink-soft);
+  font-size: 10px;
+}
+
+.provenance-summary dd {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.provenance-chips {
+  margin-bottom: 10px;
+}
+
+.provenance-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+}
+
+.provenance-labels li {
+  max-width: 100%;
+  overflow: hidden;
+  padding: 4px 10px;
+  color: var(--ink-soft);
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provenance-notice {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  color: var(--ink);
+  background: var(--amber-soft);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.provenance-details {
+  margin-top: 4px;
+}
+
+.provenance-details > summary,
+.provenance-additional > summary {
+  display: inline-block;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.provenance-details > summary:focus-visible,
+.provenance-additional > summary:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+.provenance-evidence-list {
+  display: grid;
+  gap: 12px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.provenance-evidence {
+  min-width: 0;
+  padding: 14px 16px;
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+
+.provenance-evidence__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.provenance-evidence__head strong {
+  font-size: 14px;
+}
+
+.provenance-evidence__head .rule-chip {
+  color: var(--ink-soft);
+  background: var(--surface);
+  border-color: var(--line);
+}
+
+.provenance-evidence__facts {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 0;
+}
+
+.provenance-evidence__facts > div {
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr);
+  gap: 10px;
+  font-size: 12px;
+}
+
+.provenance-evidence__facts dt {
+  color: var(--ink-soft);
+}
+
+.provenance-evidence__facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.provenance-evidence__state {
+  margin: 0 0 10px;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.provenance-evidence__state--unavailable {
+  color: var(--ink-soft);
+}
+
+.provenance-evidence__state code,
+.provenance-run__id {
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.provenance-run {
+  min-width: 0;
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.provenance-run__id {
+  display: block;
+  max-width: 100%;
+  margin-bottom: 8px;
+  font-size: 12px;
+  white-space: normal;
+}
+
+.provenance-run__facts {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+}
+
+.provenance-run__facts > div {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 10px;
+  font-size: 12px;
+}
+
+.provenance-run__facts dt {
+  color: var(--ink-soft);
+}
+
+.provenance-run__facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.provenance-additional {
+  margin-top: 10px;
+}
+
+.provenance-additional .provenance-run {
+  margin-top: 8px;
+}
+
+.provenance-status {
+  display: inline-block;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.provenance-status--completed {
+  color: var(--green);
+  background: var(--green-soft);
+  border-color: var(--green);
+}
+
+.provenance-status--running {
+  color: var(--amber);
+  background: var(--amber-soft);
+  border-color: var(--amber);
+}
+
+.provenance-status--failed {
+  color: var(--red);
+  background: var(--red-soft);
+  border-color: var(--red);
+}
+
+@media (max-width: 620px) {
+  .provenance-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .provenance-evidence__facts > div,
+  .provenance-run__facts > div {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+}

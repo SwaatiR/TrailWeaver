@@ -120,6 +120,29 @@ class InMemoryEventLedger:
                 self._first_seen[key] = finished_at
             self._associations.add((analysis_run_id, identity.provider, identity.event_id))
 
+    def recorded_observations(
+        self,
+    ) -> dict[tuple[str, str], tuple[datetime | None, tuple[str, ...]]]:
+        """Return durable observation facts keyed by ``(provider, event ID)``.
+
+        Read-only snapshot for provenance reporting: each entry carries the
+        first-recorded time and the associated run IDs in sorted order.
+        Identities with a first-seen fact but no surviving run association
+        are included with an empty run tuple so callers can report the
+        first-recorded fact while still marking run history unavailable.
+        """
+
+        run_ids: dict[tuple[str, str], set[str]] = {}
+        for analysis_run_id, provider, event_id in self._associations:
+            run_ids.setdefault((provider, event_id), set()).add(analysis_run_id)
+        return {
+            key: (
+                self._first_seen.get(key),
+                tuple(sorted(run_ids.get(key, ()))),
+            )
+            for key in self._first_seen.keys() | run_ids.keys()
+        }
+
     def clear(self) -> None:
         """Remove all recorded identities and associations.
 

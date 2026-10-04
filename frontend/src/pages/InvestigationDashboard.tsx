@@ -8,11 +8,14 @@ import type {
   AnalysisResponse,
   BlastRadiusResponse,
   CapabilitiesResponse,
+  EvidenceProvenance,
   GraphResponse,
   GuidanceResponse,
   IncidentDetail,
+  IncidentProvenance,
   IncidentSummary,
   MitreResponse,
+  ObservingRun,
   Recommendation,
   RiskResponse,
 } from "../types/api";
@@ -194,6 +197,252 @@ function GuidanceItem({ item, order }: { item: Recommendation; order: number }) 
   );
 }
 
+function shortenSourceLabel(label: string | null): string {
+  // Compact display only: the expanded details always show the complete
+  // persisted label. Middle-truncation keeps S3 bucket roots and file
+  // tails recognizable without reconstructing any path.
+  if (label === null) return "No source label";
+  const limit = 34;
+  if (label.length <= limit) return label;
+  return `${label.slice(0, 20)}…${label.slice(-12)}`;
+}
+
+function runStatusLabel(status: string): string {
+  const normalized = status.toLowerCase();
+  if (normalized === "completed") return "Completed";
+  if (normalized === "running") return "Running";
+  if (normalized === "failed") return "Failed";
+  return titleCase(status);
+}
+
+function ProvenanceRunDetails({ run }: { run: ObservingRun }) {
+  const statusClass = `provenance-status provenance-status--${run.status.toLowerCase()}`;
+  return (
+    <div className="provenance-run">
+      <code className="provenance-run__id">{run.analysis_run_id}</code>
+      <dl className="provenance-run__facts">
+        <div>
+          <dt>Source type</dt>
+          <dd>{titleCase(run.source_type)}</dd>
+        </div>
+        <div className="provenance-run__label-row">
+          <dt>Source label</dt>
+          <dd>{run.source_label ?? "No source label"}</dd>
+        </div>
+        <div>
+          <dt>Status</dt>
+          <dd><span className={statusClass}>{runStatusLabel(run.status)}</span></dd>
+        </div>
+        <div>
+          <dt>Started</dt>
+          <dd><time dateTime={run.started_at}>{formatDateTime(run.started_at)}</time></dd>
+        </div>
+        <div>
+          <dt>Finished</dt>
+          <dd>
+            {run.finished_at ? (
+              <time dateTime={run.finished_at}>{formatDateTime(run.finished_at)}</time>
+            ) : (
+              "Still running"
+            )}
+          </dd>
+        </div>
+      </dl>
+    </div>
+  );
+}
+
+function EvidenceProvenanceItem({
+  item,
+  runsById,
+}: {
+  item: EvidenceProvenance;
+  runsById: Map<string, ObservingRun>;
+}) {
+  const knownRuns = item.observed_run_ids.filter((runId) => runsById.has(runId));
+  const missingRuns = item.observed_run_ids.filter((runId) => !runsById.has(runId));
+  const [firstRunId, ...additionalRunIds] = knownRuns;
+  const firstRun = firstRunId ? runsById.get(firstRunId) : undefined;
+  const runCount = item.observed_run_ids.length;
+
+  return (
+    <li className="provenance-evidence">
+      <div className="provenance-evidence__head">
+        <strong>{item.title}</strong>
+        <span className="rule-chip">{item.rule_id}</span>
+      </div>
+      <dl className="provenance-evidence__facts">
+        <div>
+          <dt>Provider event ID</dt>
+          <dd>{item.event_id ?? "No provider event ID"}</dd>
+        </div>
+        <div>
+          <dt>Event time</dt>
+          <dd><time dateTime={item.event_time}>{formatDateTime(item.event_time)}</time></dd>
+        </div>
+        <div>
+          <dt>First recorded by TrailWeaver</dt>
+          <dd>
+            {item.first_recorded_at ? (
+              <time dateTime={item.first_recorded_at}>
+                {formatDateTime(item.first_recorded_at)}
+              </time>
+            ) : (
+              "Not recorded"
+            )}
+          </dd>
+        </div>
+      </dl>
+      {item.observation_state === "recorded" ? (
+        <p className="provenance-evidence__state">
+          Observed in {runCount} recorded run{runCount === 1 ? "" : "s"}.
+        </p>
+      ) : null}
+      {item.observation_state === "history_unavailable" ? (
+        <p className="provenance-evidence__state provenance-evidence__state--unavailable">
+          Recorded run history is unavailable for this evidence.
+        </p>
+      ) : null}
+      {item.observation_state === "identity_unavailable" ? (
+        <p className="provenance-evidence__state provenance-evidence__state--unavailable">
+          Run history is unavailable because this evidence has no provider event ID.
+        </p>
+      ) : null}
+      {firstRun ? <ProvenanceRunDetails run={firstRun} /> : null}
+      {additionalRunIds.length > 0 ? (
+        <details className="provenance-additional">
+          <summary>
+            +{additionalRunIds.length} additional observation
+            {additionalRunIds.length === 1 ? "" : "s"}
+          </summary>
+          {additionalRunIds.map((runId) => {
+            const run = runsById.get(runId);
+            return run ? <ProvenanceRunDetails key={runId} run={run} /> : null;
+          })}
+        </details>
+      ) : null}
+      {missingRuns.map((runId) => (
+        <p key={runId} className="provenance-evidence__state provenance-evidence__state--unavailable">
+          Recorded observation <code>{runId}</code> has no stored run record.
+        </p>
+      ))}
+    </li>
+  );
+}
+
+export function EvidenceProvenancePanel({
+  provenance,
+  onRetry,
+}: {
+  provenance: Loadable<IncidentProvenance>;
+  onRetry: () => void;
+}) {
+  if (provenance.status === "error") {
+    return (
+      <div className="analysis-panel provenance-panel">
+        <PanelHeading
+          id="provenance-title"
+          title="Evidence provenance"
+          description="Where this incident's evidence was recorded."
+          level="h3"
+        />
+        <PanelError
+          title="Evidence provenance unavailable"
+          message={provenance.message}
+          onRetry={onRetry}
+        />
+      </div>
+    );
+  }
+  if (provenance.status !== "success") {
+    return (
+      <div className="analysis-panel provenance-panel" aria-busy="true">
+        <PanelHeading
+          id="provenance-title"
+          title="Evidence provenance"
+          description="Where this incident's evidence was recorded."
+          level="h3"
+        />
+        <PanelSkeleton rows={3} />
+      </div>
+    );
+  }
+  const data = provenance.data;
+  const summary = data.summary;
+  const runsById = new Map(data.observing_runs.map((run) => [run.analysis_run_id, run]));
+  const labels = data.observing_runs.slice(0, 3);
+  const partialCoverage =
+    summary.identified_event_count > 0 &&
+    summary.identified_events_with_recorded_observations < summary.identified_event_count;
+  const eventRange =
+    summary.event_time_start && summary.event_time_end
+      ? `${formatDateTime(summary.event_time_start)} – ${formatDateTime(summary.event_time_end)}`
+      : "Event time unavailable";
+
+  return (
+    <div className="analysis-panel provenance-panel">
+      <PanelHeading
+        id="provenance-title"
+        title="Evidence provenance"
+        description="Recorded analysis runs that observed this incident's evidence. TrailWeaver shows where evidence was recorded — never which run created the incident."
+        level="h3"
+      />
+      <dl className="provenance-summary" aria-label="Recorded provenance summary">
+        <div>
+          <dt>Evidence signals</dt>
+          <dd>{summary.evidence_signal_count}</dd>
+        </div>
+        <div>
+          <dt>Identified events with recorded observations</dt>
+          <dd>
+            {summary.identified_events_with_recorded_observations} of{" "}
+            {summary.identified_event_count}
+          </dd>
+        </div>
+        <div>
+          <dt>Observing runs</dt>
+          <dd>{summary.observing_run_count}</dd>
+        </div>
+        <div>
+          <dt>Event time</dt>
+          <dd>{eventRange}</dd>
+        </div>
+      </dl>
+      {summary.source_types.length > 0 ? (
+        <ul className="tag-chips provenance-chips" aria-label="Observing run source types">
+          {summary.source_types.map((sourceType) => (
+            <li key={sourceType}>{titleCase(sourceType)}</li>
+          ))}
+        </ul>
+      ) : null}
+      {labels.length > 0 ? (
+        <ul className="provenance-labels" aria-label="Observing run sources">
+          {labels.map((run) => (
+            <li key={run.analysis_run_id} title={run.source_label ?? undefined}>
+              {shortenSourceLabel(run.source_label)}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {partialCoverage ? (
+        <p className="provenance-notice" role="note">
+          Recorded run history is available for{" "}
+          {summary.identified_events_with_recorded_observations} of{" "}
+          {summary.identified_event_count} identified events.
+        </p>
+      ) : null}
+      <details className="provenance-details">
+        <summary>View event-to-run details</summary>
+        <ol className="provenance-evidence-list">
+          {data.evidence.map((item) => (
+            <EvidenceProvenanceItem key={item.signal_id} item={item} runsById={runsById} />
+          ))}
+        </ol>
+      </details>
+    </div>
+  );
+}
+
 const WORKFLOW_STEPS = [
   { name: "CloudTrail evidence", detail: "AWS API records" },
   { name: "Ingestion", detail: "Normalize exports" },
@@ -294,6 +543,7 @@ function scrollToPanel(targetId: string): void {
 const INVESTIGATION_SECTIONS = {
   overview: "inv-overview",
   timeline: "inv-timeline",
+  provenance: "inv-provenance",
   analysis: "inv-analysis",
   reconstruction: "inv-reconstruction",
   blast: "inv-blast",
@@ -1629,6 +1879,7 @@ export function InvestigationDashboard() {
   const [blastRadius, setBlastRadius] = useState<Loadable<BlastRadiusResponse>>(idle());
   const [guidance, setGuidance] = useState<Loadable<GuidanceResponse>>(idle());
   const [graph, setGraph] = useState<Loadable<GraphResponse>>(idle());
+  const [provenance, setProvenance] = useState<Loadable<IncidentProvenance>>(idle());
   const [route, setRoute] = useState<Route>(
     () => parseRouteHash(window.location.hash) ?? readStoredRoute() ?? "overview",
   );
@@ -1649,6 +1900,7 @@ export function InvestigationDashboard() {
   const [blastReload, setBlastReload] = useState(0);
   const [guidanceReload, setGuidanceReload] = useState(0);
   const [graphReload, setGraphReload] = useState(0);
+  const [provenanceReload, setProvenanceReload] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1876,6 +2128,37 @@ export function InvestigationDashboard() {
 
     return () => controller.abort();
   }, [graphReload, selectedIncidentId]);
+
+  useEffect(() => {
+    // Provenance stays local to its panel: it never blocks the timeline
+    // or any other investigation section. The cancellation flag covers the
+    // resolved-before-abort race so a stale selection cannot overwrite the
+    // newly selected incident's provenance.
+    if (!selectedIncidentId) {
+      setProvenance(idle());
+      return;
+    }
+
+    const controller = new AbortController();
+    let cancelled = false;
+    setProvenance(loading());
+
+    trailWeaverApi
+      .getProvenance(selectedIncidentId, controller.signal)
+      .then((data) => {
+        if (!cancelled) setProvenance({ status: "success", data });
+      })
+      .catch((error: unknown) => {
+        if (!cancelled && !(error instanceof Error && error.name === "AbortError")) {
+          setProvenance({ status: "error", message: errorMessage(error) });
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [provenanceReload, selectedIncidentId]);
 
   const selectedSummary = useMemo(() => {
     if (incidents.status !== "success") return undefined;
@@ -2473,6 +2756,7 @@ export function InvestigationDashboard() {
                 <nav className="section-nav" aria-label="Investigation sections">
                   <button type="button" onClick={() => returnToOverview(INVESTIGATION_SECTIONS.overview)}>Overview</button>
                   <button type="button" onClick={() => returnToOverview(INVESTIGATION_SECTIONS.timeline)}>Timeline</button>
+                  <button type="button" onClick={() => returnToOverview(INVESTIGATION_SECTIONS.provenance)}>Provenance</button>
                   <button type="button" onClick={() => returnToOverview(INVESTIGATION_SECTIONS.analysis)}>Risk + ATT&amp;CK</button>
                   <button type="button" onClick={() => returnToOverview(INVESTIGATION_SECTIONS.reconstruction)}>Graph + Replay</button>
                   <button type="button" onClick={() => returnToOverview(INVESTIGATION_SECTIONS.blast)}>Potential impact</button>
@@ -2535,6 +2819,18 @@ export function InvestigationDashboard() {
                     </div>
                   ) : null}
                 </div>
+              </section>
+
+              <section
+                className="investigation-section provenance-section"
+                id={INVESTIGATION_SECTIONS.provenance}
+                aria-labelledby="provenance-title"
+                tabIndex={-1}
+              >
+                <EvidenceProvenancePanel
+                  provenance={provenance}
+                  onRetry={() => setProvenanceReload((value) => value + 1)}
+                />
               </section>
 
               <section

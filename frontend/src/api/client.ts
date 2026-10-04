@@ -8,6 +8,7 @@ import type {
   GuidanceResponse,
   HealthResponse,
   IncidentDetail,
+  IncidentProvenance,
   IncidentSummary,
   MitreResponse,
   RiskResponse,
@@ -77,6 +78,8 @@ export const trailWeaverApi = {
     getJson<IncidentSummary[]>("/api/v1/incidents", signal),
   getIncident: (incidentId: string, signal?: AbortSignal) =>
     getJson<IncidentDetail>(incidentPath(incidentId), signal),
+  getProvenance: (incidentId: string, signal?: AbortSignal) =>
+    getJson<IncidentProvenance>(incidentPath(incidentId, "/provenance"), signal),
   getRisk: (incidentId: string, signal?: AbortSignal) =>
     getJson<RiskResponse>(incidentPath(incidentId, "/risk"), signal),
   getMitre: (incidentId: string, signal?: AbortSignal) =>

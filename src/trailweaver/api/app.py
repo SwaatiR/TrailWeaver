@@ -43,6 +43,7 @@ from trailweaver.api.schemas import (
     IncidentDetailResponse,
     IncidentSummaryResponse,
     MitreResponse,
+    ProvenanceResponse,
     RiskResponse,
     S3AnalysisRequest,
     S3PrefixAnalysisRequest,
@@ -74,6 +75,10 @@ from trailweaver.event_ledger import (
     InMemoryEventLedger,
 )
 from trailweaver.observability import log_event
+from trailweaver.provenance import (
+    IncidentProvenanceRepository,
+    InMemoryProvenanceReader,
+)
 from trailweaver.runtime import validate_cors_origins
 from trailweaver.signal_history import (
     InMemorySignalHistory,
@@ -337,6 +342,23 @@ def create_app(
             )
         except IncidentNotFoundError as error:
             raise incident_not_found(error) from error
+
+    if isinstance(incident_repository, SQLiteIncidentRepository):
+        provenance_source: IncidentProvenanceRepository = incident_repository
+    else:
+        provenance_source = InMemoryProvenanceReader(
+            incident_repository, run_repository, event_ledger
+        )
+
+    @application.get(
+        "/api/v1/incidents/{incident_id}/provenance",
+        response_model=ProvenanceResponse,
+    )
+    async def get_provenance(incident_id: str) -> ProvenanceResponse:
+        provenance = provenance_source.get_incident_provenance(incident_id)
+        if provenance is None:
+            raise incident_not_found(IncidentNotFoundError(incident_id)) from None
+        return ProvenanceResponse.from_domain(provenance)
 
     @application.get(
         "/api/v1/capabilities",

@@ -40,6 +40,11 @@ from trailweaver.models import (
     NormalizedEvent,
     Resource,
 )
+from trailweaver.provenance import (
+    IncidentProvenance,
+    ProvenanceObservation,
+    build_incident_provenance,
+)
 from trailweaver.signal_history import InvalidStoredSignalError, SignalHistoryError
 from trailweaver.signals import Signal, SignalSeverity
 
@@ -843,6 +848,116 @@ class SQLiteIncidentRepository:
             (analysis_run_id,),
         ).fetchone()
         return None if row is None else _run_from_row(row)
+
+    def get_incident_provenance(
+        self, incident_id: str
+    ) -> IncidentProvenance | None:
+        """Return recorded observation provenance for one incident's evidence.
+
+        The incident itself is reconstructed with the existing loader; all
+        observation facts and run records come from ONE set-based query
+        scoped to ``incident_id`` that walks persisted signal positions
+        through the durable event/run associations. Signals without a
+        provider event ID survive the ``LEFT JOIN``s with empty history.
+        Returns None only when the incident itself is absent; an existing
+        incident without recorded history still yields a complete
+        response. ``signal_history`` is never consulted.
+        """
+
+        try:
+            with closing(self._connect()) as connection:
+                incident = self._load_incident(connection, incident_id)
+                if incident is None:
+                    return None
+                rows = connection.execute(
+                    """
+                    SELECT s.position AS position,
+                           s.provider AS provider,
+                           s.event_id AS event_id,
+                           e.first_seen_at AS first_seen_at,
+                           ar.analysis_run_id AS analysis_run_id,
+                           ar.source_type AS source_type,
+                           ar.source_label AS source_label,
+                           ar.status AS status,
+                           ar.started_at AS started_at,
+                           ar.finished_at AS finished_at,
+                           ar.records_seen AS records_seen,
+                           ar.records_accepted AS records_accepted,
+                           ar.signals_created AS signals_created,
+                           ar.correlations_created AS correlations_created,
+                           ar.incidents_created AS incidents_created,
+                           ar.failure_phase AS failure_phase,
+                           ar.sequence AS run_sequence
+                    FROM signals AS s
+                    LEFT JOIN events AS e
+                      ON e.provider = s.provider
+                     AND e.event_identity = s.event_id
+                    LEFT JOIN analysis_run_events AS are
+                      ON are.provider = s.provider
+                     AND are.event_identity = s.event_id
+                    LEFT JOIN analysis_runs AS ar
+                      ON ar.analysis_run_id = are.analysis_run_id
+                    WHERE s.incident_id = ?
+                    ORDER BY s.position, ar.started_at, ar.sequence
+                    """,
+                    (incident_id,),
+                ).fetchall()
+                grouped: dict[tuple[str, str], set[str]] = {}
+                first_seen: dict[tuple[str, str], str] = {}
+                run_records: dict[str, AnalysisRunRecord] = {}
+                run_sequence: dict[str, int] = {}
+                for row in rows:
+                    event_id = _optional_str(row["event_id"])
+                    if event_id is None:
+                        continue
+                    key = (_required_str(row["provider"]), event_id)
+                    if row["first_seen_at"] is not None and key not in first_seen:
+                        first_seen[key] = _required_str(row["first_seen_at"])
+                    run_id = _optional_str(row["analysis_run_id"])
+                    if run_id is None:
+                        continue
+                    grouped.setdefault(key, set()).add(run_id)
+                    if run_id not in run_records:
+                        run_records[run_id] = _run_from_row(row)
+                        sequence_value = row["run_sequence"]
+                        if not isinstance(sequence_value, int):
+                            raise TypeError(
+                                "Persisted analysis-run sequence is invalid"
+                            )
+                        run_sequence[run_id] = sequence_value
+                observations: dict[
+                    tuple[str, str], ProvenanceObservation
+                ] = {}
+                for key in first_seen.keys() | grouped.keys():
+                    first_seen_text = first_seen.get(key)
+                    observations[key] = ProvenanceObservation(
+                        first_recorded_at=(
+                            None
+                            if first_seen_text is None
+                            else _datetime_from_storage(first_seen_text)
+                        ),
+                        run_ids=tuple(sorted(grouped.get(key, ()))),
+                    )
+                return build_incident_provenance(
+                    incident,
+                    run_records=run_records,
+                    observations=observations,
+                    run_sequence=run_sequence,
+                )
+        except sqlite3.Error as error:
+            raise IncidentRepositoryError(
+                "Unable to load incident provenance"
+            ) from error
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+            InvalidStoredAnalysisRunError,
+        ) as error:
+            raise InvalidStoredIncidentError(
+                f"Persisted provenance for incident {incident_id!r} is invalid"
+            ) from error
 
 
 def _require_running(

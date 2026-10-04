@@ -85,6 +85,14 @@ for equal timestamps), and presents the incident as a deterministic timeline. Si
 carry stable identities, so the timeline, graph, and replay join on explicit
 `signal_id` references rather than inferred timestamp matches.
 
+### Evidence provenance
+
+Below the timeline, the investigation shows recorded evidence provenance: which recorded
+analysis runs observed the identified events behind each signal, with the first time
+TrailWeaver recorded each event. This answers where the evidence was recorded — it
+never claims which run created or owns an incident, and partial history is reported
+truthfully when some evidence has no recorded observation history.
+
 ### Risk and MITRE ATT&CK
 
 Risk factors are deterministic explanations of why an incident matters, and MITRE

@@ -18,6 +18,7 @@ from trailweaver.incidents import Incident
 from trailweaver.investigation import InvestigationGuidance
 from trailweaver.mitre import MitreMapping
 from trailweaver.models import Actor
+from trailweaver.provenance import IncidentProvenance
 from trailweaver.risk import RiskAssessment
 
 ApiJsonValue: TypeAlias = JsonValue
@@ -83,6 +84,99 @@ class TimelineEntryResponse(BaseModel):
     rule_id: str
     title: str
     reason: str
+
+
+class ProvenanceSummaryResponse(BaseModel):
+    """Aggregate counts describing an incident's recorded provenance."""
+
+    evidence_signal_count: int
+    identified_event_count: int
+    identified_events_with_recorded_observations: int
+    unidentified_signal_count: int
+    observing_run_count: int
+    source_types: list[str]
+    event_time_start: datetime | None = None
+    event_time_end: datetime | None = None
+
+
+class ObservingRunResponse(BaseModel):
+    """One recorded analysis run associated with incident evidence."""
+
+    analysis_run_id: str
+    source_type: str
+    source_label: str | None = None
+    status: str
+    started_at: datetime
+    finished_at: datetime | None = None
+
+
+class EvidenceProvenanceResponse(BaseModel):
+    """Recorded observation history for one incident evidence signal."""
+
+    signal_id: str
+    rule_id: str
+    title: str
+    provider: str
+    event_id: str | None = None
+    event_time: datetime
+    observation_state: str
+    first_recorded_at: datetime | None = None
+    observed_run_ids: list[str]
+
+
+class ProvenanceResponse(BaseModel):
+    """Read-only recorded provenance for one incident's evidence."""
+
+    incident_id: str
+    summary: ProvenanceSummaryResponse
+    observing_runs: list[ObservingRunResponse]
+    evidence: list[EvidenceProvenanceResponse]
+
+    @classmethod
+    def from_domain(cls, provenance: IncidentProvenance) -> "ProvenanceResponse":
+        """Build an API provenance view from explicitly selected fields."""
+
+        summary = provenance.summary
+        return cls(
+            incident_id=provenance.incident_id,
+            summary=ProvenanceSummaryResponse(
+                evidence_signal_count=summary.evidence_signal_count,
+                identified_event_count=summary.identified_event_count,
+                identified_events_with_recorded_observations=(
+                    summary.identified_events_with_recorded_observations
+                ),
+                unidentified_signal_count=summary.unidentified_signal_count,
+                observing_run_count=summary.observing_run_count,
+                source_types=list(summary.source_types),
+                event_time_start=summary.event_time_start,
+                event_time_end=summary.event_time_end,
+            ),
+            observing_runs=[
+                ObservingRunResponse(
+                    analysis_run_id=run.analysis_run_id,
+                    source_type=run.source_type.value,
+                    source_label=run.source_label,
+                    status=run.status.value,
+                    started_at=run.started_at,
+                    finished_at=run.finished_at,
+                )
+                for run in provenance.observing_runs
+            ],
+            evidence=[
+                EvidenceProvenanceResponse(
+                    signal_id=item.signal_id,
+                    rule_id=item.rule_id,
+                    title=item.title,
+                    provider=item.provider,
+                    event_id=item.event_id,
+                    event_time=item.event_time,
+                    observation_state=item.observation_state.value,
+                    first_recorded_at=item.first_recorded_at,
+                    observed_run_ids=list(item.observed_run_ids),
+                )
+                for item in provenance.evidence
+            ],
+        )
 
 
 class IncidentDetailResponse(BaseModel):
