@@ -118,6 +118,8 @@ class _FailingDetectionEngine:
 
 
 class _FailingCorrelationEngine:
+    history_window = timedelta(minutes=15)
+
     def evaluate(self, _signals: object) -> tuple[()]:
         raise RuntimeError("correlation failed")
 
@@ -225,7 +227,7 @@ def test_sqlite_event_tables_hold_identity_only_with_exact_columns(
 
     connection = sqlite3.connect(database)
     try:
-        assert connection.execute("PRAGMA user_version").fetchone() == (3,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (4,)
         assert {
             row[1]
             for row in connection.execute("PRAGMA table_info(events)").fetchall()
@@ -345,7 +347,7 @@ def test_ledger_storage_failure_surfaces_as_ledger_error(
         )
 
 
-def test_v2_database_migrates_to_v3_preserving_all_existing_data(
+def test_v2_database_migrates_to_v4_preserving_all_existing_data(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "v2.sqlite3"
@@ -359,6 +361,8 @@ def test_v2_database_migrates_to_v3_preserving_all_existing_data(
     run_id = result.analysis_run.analysis_run_id
     incident_id = result.incidents[0].incident_id
     with sqlite3.connect(database) as connection:
+        connection.execute("DROP TABLE signal_history")
+        connection.execute("DROP TABLE emitted_correlations")
         connection.execute("DROP TABLE analysis_run_events")
         connection.execute("DROP TABLE events")
         connection.execute("PRAGMA user_version = 2")
@@ -370,10 +374,16 @@ def test_v2_database_migrates_to_v3_preserving_all_existing_data(
     assert migrated.list_runs()[0].analysis_run_id == run_id
     assert migrated.known_identities([]) == frozenset()
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone() == (3,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (4,)
         assert connection.execute("SELECT COUNT(*) FROM events").fetchone() == (0,)
         assert connection.execute(
             "SELECT COUNT(*) FROM analysis_run_events"
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM signal_history"
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM emitted_correlations"
         ).fetchone() == (0,)
     assert SQLiteIncidentRepository(database).list_runs()[0].analysis_run_id == run_id
 
@@ -390,6 +400,8 @@ def test_failed_v2_migration_leaves_version_and_data_untouched(
     )
     runner.run_cloudtrail_file(ATTACK_FIXTURE)
     with sqlite3.connect(database) as connection:
+        connection.execute("DROP TABLE IF EXISTS signal_history")
+        connection.execute("DROP TABLE IF EXISTS emitted_correlations")
         connection.execute("DROP TABLE analysis_run_events")
         connection.execute("DROP TABLE events")
         connection.execute("CREATE VIEW events AS SELECT 1 AS value")
@@ -454,7 +466,7 @@ def test_sequential_duplicate_run_skips_known_events_but_records_observation(
     assert len(_event_rows(database)) == 3
 
 
-def test_mixed_run_processes_only_new_events_without_cross_run_correlation(
+def test_mixed_run_correlates_new_signals_with_history_without_redetecting(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "mixed.sqlite3"
@@ -472,9 +484,14 @@ def test_mixed_run_processes_only_new_events_without_cross_run_correlation(
 
     assert combined.analyzed_event_count == 2
     assert combined.signal_count == 2
-    assert combined.correlation_count == 0
-    assert combined.incident_count == 0
-    assert len(repository.list_incidents()) == 0
+    assert combined.correlation_count == 1
+    assert combined.incident_count == 1
+    assert [entry.rule_id for entry in combined.incidents[0].timeline] == [
+        "aws.auth.console_login_without_mfa",
+        "aws.iam.access_key_created",
+        "aws.iam.admin_policy_attached_to_user",
+    ]
+    assert len(repository.list_incidents()) == 1
     associations = _associations(database)
     assert sorted(row[0] for row in associations).count(
         combined.analysis_run.analysis_run_id
@@ -631,8 +648,11 @@ def test_acknowledgement_failure_returns_no_result_and_keeps_retry_possible(
         incidents, event_ledger_repository=InMemoryEventLedger()
     )
     retry = healthy.run_cloudtrail_file(ATTACK_FIXTURE)
+    # The retry redetects everything (nothing was acknowledged) but the
+    # durable tombstone suppresses a second incident for the same evidence.
     assert retry.signal_count == 3
-    assert retry.incident_count == 1
+    assert retry.incident_count == 0
+    assert len(incidents.list_incidents()) == 1
 
 
 def test_crash_leaves_running_row_and_retryable_evidence(tmp_path: Path) -> None:

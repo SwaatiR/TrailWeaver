@@ -1,6 +1,7 @@
 """Application services and incident repository contracts for the HTTP API."""
 
 from collections.abc import Iterable
+from enum import StrEnum
 from typing import Protocol
 
 from trailweaver.attack_graph import AttackGraph, AttackGraphBuilder
@@ -10,6 +11,13 @@ from trailweaver.incidents import Incident
 from trailweaver.investigation import InvestigationAdvisor, InvestigationGuidance
 from trailweaver.mitre import MitreMapper, MitreMapping
 from trailweaver.risk import RiskAssessment, RiskScorer
+
+
+class SaveIncidentOutcome(StrEnum):
+    """Whether an atomic correlation-scoped incident save created output."""
+
+    CREATED = "created"
+    ALREADY_EMITTED = "already_emitted"
 
 
 class IncidentRepository(Protocol):
@@ -23,6 +31,17 @@ class IncidentRepository(Protocol):
 
     def save_incident(self, incident: Incident) -> None:
         """Insert an incident, failing if its ID already exists."""
+
+    def save_incident_if_correlation_new(
+        self, incident: Incident, correlation_key: str
+    ) -> SaveIncidentOutcome:
+        """Atomically persist an incident with its correlation identity.
+
+        Exactly one of two durable outcomes results: the correlation
+        identity was absent and the incident is now persisted (CREATED), or
+        the identity was already emitted and nothing was persisted
+        (ALREADY_EMITTED). There is no committed intermediate state.
+        """
 
     def clear_incidents(self) -> None:
         """Remove every stored incident, leaving a fresh workspace.
@@ -49,6 +68,7 @@ class InMemoryIncidentRepository:
             raise ValueError("Incident IDs must be unique")
         self._incidents = incident_items
         self._incidents_by_id = incidents_by_id
+        self._emitted_correlations: set[str] = set()
 
     def list_incidents(self) -> tuple[Incident, ...]:
         """Return the incident snapshot supplied during construction."""
@@ -70,6 +90,21 @@ class InMemoryIncidentRepository:
         self._incidents = (*self._incidents, incident)
         self._incidents_by_id[incident.incident_id] = incident
 
+    def save_incident_if_correlation_new(
+        self, incident: Incident, correlation_key: str
+    ) -> SaveIncidentOutcome:
+        """Persist an incident with its correlation identity, at most once.
+
+        Delegates the insert to ``save_incident`` so subclasses that inject
+        save failures keep working; a failed save records no identity.
+        """
+
+        if correlation_key in self._emitted_correlations:
+            return SaveIncidentOutcome.ALREADY_EMITTED
+        self.save_incident(incident)
+        self._emitted_correlations.add(correlation_key)
+        return SaveIncidentOutcome.CREATED
+
     def check_health(self) -> None:
         """The process-local repository has no external dependency."""
 
@@ -82,6 +117,15 @@ class InMemoryIncidentRepository:
 
         self._incidents = ()
         self._incidents_by_id = {}
+
+    def clear_emitted_correlations(self) -> None:
+        """Forget emitted correlation identities without touching incidents.
+
+        Demo replay support only: production workspace clearing deliberately
+        preserves these tombstones so old evidence cannot refire.
+        """
+
+        self._emitted_correlations.clear()
 
 
 class IncidentNotFoundError(LookupError):

@@ -2,7 +2,7 @@ import asyncio
 import json
 from copy import deepcopy
 from dataclasses import FrozenInstanceError
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import cast
 
@@ -30,6 +30,7 @@ from trailweaver.api.execution import (
 from trailweaver.api.service import (
     IncidentAlreadyExistsError,
     InMemoryIncidentRepository,
+    SaveIncidentOutcome,
 )
 from trailweaver.api.sqlite_repository import SQLiteIncidentRepository
 from trailweaver.cloudtrail_ingestion import (
@@ -492,8 +493,6 @@ def test_duplicate_incident_error_is_not_misclassified_as_idempotent_success() -
     repository = InMemoryIncidentRepository()
 
     def _runner() -> InvestigationRunner:
-        # Each runner owns an independent event ledger so both invocations
-        # fully process the same evidence; only incident identity collides.
         return InvestigationRunner(
             detection_engine=DetectionEngine(AWS_RULES),
             correlation_engine=CorrelationEngine(AWS_CORRELATION_RULES),
@@ -503,8 +502,11 @@ def test_duplicate_incident_error_is_not_misclassified_as_idempotent_success() -
 
     _runner().run_cloudtrail_file(ATTACK_FIXTURE)
 
+    renamed = json.loads(ATTACK_FIXTURE.read_text(encoding="utf-8"))
+    for position, record in enumerate(renamed["Records"]):
+        record["eventID"] = f"aaaaaaaa-0000-4000-8000-{position:012d}"
     with pytest.raises(IncidentAlreadyExistsError, match="already exists"):
-        _runner().run_cloudtrail_file(ATTACK_FIXTURE)
+        _runner().run_cloudtrail_json(json.dumps(renamed))
 
     assert len(repository.list_incidents()) == 1
 
@@ -681,6 +683,7 @@ def _two_actor_attack_document() -> JsonObject:
 class _FailOnSecondSaveRepository:
     def __init__(self) -> None:
         self._incidents: list[Incident] = []
+        self._emitted_correlations: set[str] = set()
         self.save_attempts = 0
 
     def list_incidents(self) -> tuple[Incident, ...]:
@@ -701,6 +704,15 @@ class _FailOnSecondSaveRepository:
         if self.save_attempts == 2:
             raise RuntimeError("repository unavailable")
         self._incidents.append(incident)
+
+    def save_incident_if_correlation_new(
+        self, incident: Incident, correlation_key: str
+    ) -> SaveIncidentOutcome:
+        if correlation_key in self._emitted_correlations:
+            return SaveIncidentOutcome.ALREADY_EMITTED
+        self.save_incident(incident)
+        self._emitted_correlations.add(correlation_key)
+        return SaveIncidentOutcome.CREATED
 
 
 class _FixedIdentityIncidentFactory(IncidentFactory):
@@ -725,6 +737,8 @@ class _FailingDetectionEngine:
 
 
 class _FailingCorrelationEngine:
+    history_window = timedelta(minutes=15)
+
     def evaluate(self, _signals: object) -> tuple[()]:
         raise RuntimeError("correlation failed")
 

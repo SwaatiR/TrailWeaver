@@ -36,6 +36,7 @@ from trailweaver.runtime import (
     RuntimeConfigurationError,
     validate_cors_origins,
 )
+from trailweaver.signal_history import SignalHistoryError
 
 EXIT_SUCCESS = 0
 EXIT_SOURCE_ERROR = 3
@@ -77,6 +78,7 @@ def main(
                 repository,
                 analysis_run_repository=repository,
                 event_ledger_repository=repository,
+                signal_history_repository=repository,
             ).run_cloudtrail_file(
                 arguments.path,
                 source_label=arguments.source_label,
@@ -91,6 +93,7 @@ def main(
                 repository,
                 analysis_run_repository=repository,
                 event_ledger_repository=repository,
+                signal_history_repository=repository,
             )
             adapter = (
                 S3CloudTrailAdapter(s3_client)
@@ -140,6 +143,7 @@ def main(
         EventLedgerError,
         IncidentRepositoryError,
         OSError,
+        SignalHistoryError,
     ) as error:
         log_event(
             _LOGGER,

@@ -22,8 +22,12 @@ from trailweaver.analysis_runs import (
     AnalysisRunStatus,
     AnalysisSourceType,
 )
-from trailweaver.api.service import IncidentAlreadyExistsError
-from trailweaver.correlation import CorrelationMatch
+from trailweaver.api.service import IncidentAlreadyExistsError, SaveIncidentOutcome
+from trailweaver.correlation import (
+    ActorCorrelationKey,
+    CorrelationMatch,
+    actor_correlation_key,
+)
 from trailweaver.event_ledger import (
     EventIdentity,
     EventLedgerError,
@@ -36,9 +40,51 @@ from trailweaver.models import (
     NormalizedEvent,
     Resource,
 )
+from trailweaver.signal_history import InvalidStoredSignalError, SignalHistoryError
 from trailweaver.signals import Signal, SignalSeverity
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
+
+_SIGNAL_HISTORY_TABLE_SQL = """CREATE TABLE signal_history (
+    signal_id TEXT PRIMARY KEY CHECK (length(trim(signal_id)) > 0),
+    provider TEXT NOT NULL CHECK (length(trim(provider)) > 0),
+    event_identity TEXT NOT NULL CHECK (length(trim(event_identity)) > 0),
+    rule_id TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    event_timestamp TEXT NOT NULL,
+    service TEXT NOT NULL,
+    action TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    error_code TEXT,
+    error_message TEXT,
+    region TEXT,
+    source_ip TEXT,
+    actor_json TEXT,
+    resources_json TEXT NOT NULL,
+    attributes_json TEXT NOT NULL,
+    actor_provider TEXT,
+    actor_account_id TEXT,
+    actor_id_type TEXT,
+    actor_id_value TEXT,
+    UNIQUE (provider, event_identity, rule_id)
+)"""
+
+_EMITTED_CORRELATIONS_TABLE_SQL = """CREATE TABLE emitted_correlations (
+    correlation_key TEXT PRIMARY KEY CHECK (length(trim(correlation_key)) > 0),
+    rule_id TEXT NOT NULL,
+    emitted_at TEXT NOT NULL
+)"""
+
+_SIGNAL_HISTORY_INDEX_SQL = """CREATE INDEX idx_signal_history_actor_time
+ON signal_history (
+    actor_provider,
+    actor_id_type,
+    actor_id_value,
+    event_timestamp
+)"""
 
 _EVENT_IDENTITY_CHUNK_SIZE = 500
 
@@ -373,6 +419,103 @@ class SQLiteIncidentRepository:
         except sqlite3.Error as error:
             raise EventLedgerError("Unable to acknowledge run events") from error
 
+    def store_signals(self, signals: Collection[Signal]) -> None:
+        """Idempotently store identified signals for future correlation.
+
+        Only signals carrying a trustworthy event identity are recorded;
+        the first stored representation wins and later copies are ignored,
+        which keeps deterministic correlation evidence stable across
+        retries. One transaction covers the whole batch.
+        """
+
+        rows = []
+        for signal in signals:
+            event = signal.source_event
+            if (
+                event.event_id is None
+                or not event.event_id.strip()
+                or not event.provider
+                or not event.provider.strip()
+            ):
+                continue
+            rows.append(_history_signal_to_storage(signal))
+        if not rows:
+            return
+        try:
+            with closing(self._connect()) as connection, connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.executemany(
+                    """
+                    INSERT OR IGNORE INTO signal_history (
+                        signal_id, provider, event_identity, rule_id,
+                        severity, title, description, reason, event_timestamp,
+                        service, action, outcome, error_code, error_message,
+                        region, source_ip, actor_json, resources_json,
+                        attributes_json, actor_provider, actor_account_id,
+                        actor_id_type, actor_id_value
+                    ) VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?
+                    )
+                    """,
+                    rows,
+                )
+        except sqlite3.Error as error:
+            raise SignalHistoryError("Unable to store signal history") from error
+
+    def candidate_signals(
+        self,
+        *,
+        actors: Collection[ActorCorrelationKey],
+        start: datetime,
+        end: datetime,
+    ) -> tuple[Signal, ...]:
+        """Return historical signals in range for the given actor keys.
+
+        Time bounds compare serialized event timestamps; actor account IDs
+        use NULL-safe comparison so missing accounts match exactly.
+        Results arrive ordered by event time, then signal ID.
+        """
+
+        keys = tuple(dict.fromkeys(actors))
+        if not keys:
+            return ()
+        start_text = _datetime_to_storage(start)
+        end_text = _datetime_to_storage(end)
+        try:
+            with closing(self._connect()) as connection:
+                found: list[Signal] = []
+                for key in keys:
+                    rows = connection.execute(
+                        """
+                        SELECT * FROM signal_history
+                        WHERE actor_provider = ?
+                          AND actor_id_type = ?
+                          AND actor_id_value = ?
+                          AND actor_account_id IS ?
+                          AND event_timestamp >= ?
+                          AND event_timestamp <= ?
+                        ORDER BY event_timestamp, signal_id
+                        """,
+                        (
+                            key[0],
+                            key[2],
+                            key[3],
+                            key[1],
+                            start_text,
+                            end_text,
+                        ),
+                    ).fetchall()
+                    found.extend(_history_signal_from_row(row) for row in rows)
+        except sqlite3.Error as error:
+            raise SignalHistoryError("Unable to load signal history") from error
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise InvalidStoredSignalError(
+                "Persisted signal history is invalid"
+            ) from error
+        found.sort(key=lambda signal: (signal.source_event.timestamp, signal.signal_id))
+        return tuple(found)
+
     def get_incident(self, incident_id: str) -> Incident | None:
         """Return an incident by exact ID, or ``None`` if it is absent."""
 
@@ -388,86 +531,132 @@ class SQLiteIncidentRepository:
         try:
             with closing(self._connect()) as connection, connection:
                 connection.execute("BEGIN IMMEDIATE")
-                existing = connection.execute(
-                    "SELECT 1 FROM incidents WHERE incident_id = ?",
-                    (incident.incident_id,),
-                ).fetchone()
-                if existing is not None:
-                    raise IncidentAlreadyExistsError(
-                        f"Incident {incident.incident_id!r} already exists"
-                    )
-                connection.execute(
-                    """
-                    INSERT INTO incidents (
-                        incident_id, title, description, severity, summary, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        incident.incident_id,
-                        incident.title,
-                        incident.description,
-                        incident.severity.value,
-                        incident.summary,
-                        _datetime_to_storage(incident.created_at),
-                    ),
-                )
-                match = incident.correlation_match
-                connection.execute(
-                    """
-                    INSERT INTO correlation_matches (
-                        incident_id, correlation_id, rule_id, title, description, reason
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        incident.incident_id,
-                        match.correlation_id,
-                        match.rule_id,
-                        match.title,
-                        match.description,
-                        match.reason,
-                    ),
-                )
-                for position, signal in enumerate(match.signals):
-                    event = signal.source_event
-                    connection.execute(
-                        """
-                        INSERT INTO signals (
-                            incident_id, position, signal_id, rule_id, title,
-                            description, severity, reason, event_timestamp, provider,
-                            service, action, event_id, outcome, error_code, error_message,
-                            region, source_ip, actor_json, resources_json, attributes_json
-                        ) VALUES (
-                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                        )
-                        """,
-                        (
-                            incident.incident_id,
-                            position,
-                            signal.signal_id,
-                            signal.rule_id,
-                            signal.title,
-                            signal.description,
-                            signal.severity.value,
-                            signal.reason,
-                            _datetime_to_storage(event.timestamp),
-                            event.provider,
-                            event.service,
-                            event.action,
-                            event.event_id,
-                            event.outcome.value,
-                            event.error_code,
-                            event.error_message,
-                            event.region,
-                            event.source_ip,
-                            _actor_to_json(event.actor),
-                            _resources_to_json(event.resources),
-                            _json_to_storage(event.attributes),
-                        ),
-                    )
+                self._insert_incident(connection, incident)
         except IncidentAlreadyExistsError:
             raise
         except (sqlite3.Error, TypeError, ValueError) as error:
             raise IncidentRepositoryError("Unable to save incident") from error
+
+    def save_incident_if_correlation_new(
+        self, incident: Incident, correlation_key: str
+    ) -> SaveIncidentOutcome:
+        """Persist an incident with its correlation identity, at most once.
+
+        The tombstone insert and the incident, match, and child-signal
+        inserts share one transaction: a duplicate key rolls everything back
+        and reports ALREADY_EMITTED, while any other failure rolls back a
+        partially written incident. There is no committed intermediate state.
+        """
+
+        if not correlation_key or not correlation_key.strip():
+            raise ValueError("correlation_key must be non-empty")
+        try:
+            with closing(self._connect()) as connection, connection:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    connection.execute(
+                        """
+                        INSERT INTO emitted_correlations (
+                            correlation_key, rule_id, emitted_at
+                        ) VALUES (?, ?, ?)
+                        """,
+                        (
+                            correlation_key,
+                            incident.correlation_match.rule_id,
+                            _datetime_to_storage(incident.created_at),
+                        ),
+                    )
+                except sqlite3.IntegrityError:
+                    return SaveIncidentOutcome.ALREADY_EMITTED
+                self._insert_incident(connection, incident)
+        except IncidentAlreadyExistsError:
+            raise
+        except (sqlite3.Error, TypeError, ValueError) as error:
+            raise IncidentRepositoryError("Unable to save incident") from error
+        return SaveIncidentOutcome.CREATED
+
+    @staticmethod
+    def _insert_incident(
+        connection: sqlite3.Connection, incident: Incident
+    ) -> None:
+        """Insert incident, match, and child-signal rows on one connection."""
+
+        existing = connection.execute(
+            "SELECT 1 FROM incidents WHERE incident_id = ?",
+            (incident.incident_id,),
+        ).fetchone()
+        if existing is not None:
+            raise IncidentAlreadyExistsError(
+                f"Incident {incident.incident_id!r} already exists"
+            )
+        connection.execute(
+            """
+            INSERT INTO incidents (
+                incident_id, title, description, severity, summary, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                incident.incident_id,
+                incident.title,
+                incident.description,
+                incident.severity.value,
+                incident.summary,
+                _datetime_to_storage(incident.created_at),
+            ),
+        )
+        match = incident.correlation_match
+        connection.execute(
+            """
+            INSERT INTO correlation_matches (
+                incident_id, correlation_id, rule_id, title, description, reason
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                incident.incident_id,
+                match.correlation_id,
+                match.rule_id,
+                match.title,
+                match.description,
+                match.reason,
+            ),
+        )
+        for position, signal in enumerate(match.signals):
+            event = signal.source_event
+            connection.execute(
+                """
+                INSERT INTO signals (
+                    incident_id, position, signal_id, rule_id, title,
+                    description, severity, reason, event_timestamp, provider,
+                    service, action, event_id, outcome, error_code, error_message,
+                    region, source_ip, actor_json, resources_json, attributes_json
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                (
+                    incident.incident_id,
+                    position,
+                    signal.signal_id,
+                    signal.rule_id,
+                    signal.title,
+                    signal.description,
+                    signal.severity.value,
+                    signal.reason,
+                    _datetime_to_storage(event.timestamp),
+                    event.provider,
+                    event.service,
+                    event.action,
+                    event.event_id,
+                    event.outcome.value,
+                    event.error_code,
+                    event.error_message,
+                    event.region,
+                    event.source_ip,
+                    _actor_to_json(event.actor),
+                    _resources_to_json(event.resources),
+                    _json_to_storage(event.attributes),
+                ),
+            )
 
     def clear_incidents(self) -> None:
         """Remove every persisted incident and its related rows atomically.
@@ -521,7 +710,7 @@ class SQLiteIncidentRepository:
                 if version == _SCHEMA_VERSION:
                     connection.commit()
                     return
-                if version not in {0, 1, 2}:
+                if version not in {0, 1, 2, 3}:
                     raise UnsupportedSchemaVersionError(
                         f"Unsupported SQLite incident schema version {version}; "
                         f"this application supports {_SCHEMA_VERSION}"
@@ -589,8 +778,12 @@ class SQLiteIncidentRepository:
                         connection.execute(statement)
                 if version in {0, 1}:
                     connection.execute(_ANALYSIS_RUNS_TABLE_SQL)
-                connection.execute(_EVENTS_TABLE_SQL)
-                connection.execute(_RUN_EVENTS_TABLE_SQL)
+                if version in {0, 1, 2}:
+                    connection.execute(_EVENTS_TABLE_SQL)
+                    connection.execute(_RUN_EVENTS_TABLE_SQL)
+                connection.execute(_SIGNAL_HISTORY_TABLE_SQL)
+                connection.execute(_EMITTED_CORRELATIONS_TABLE_SQL)
+                connection.execute(_SIGNAL_HISTORY_INDEX_SQL)
                 connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
                 connection.commit()
         except UnsupportedSchemaVersionError:
@@ -729,6 +922,73 @@ def _run_from_row(row: sqlite3.Row) -> AnalysisRunRecord:
         raise InvalidStoredAnalysisRunError(
             "Persisted analysis-run data is invalid"
         ) from error
+
+
+def _history_signal_to_storage(signal: Signal) -> tuple[object, ...]:
+    """Serialize a history signal, including its actor query key columns."""
+
+    event = signal.source_event
+    actor_key = actor_correlation_key(event)
+    return (
+        signal.signal_id,
+        event.provider,
+        event.event_id,
+        signal.rule_id,
+        signal.severity.value,
+        signal.title,
+        signal.description,
+        signal.reason,
+        _datetime_to_storage(event.timestamp),
+        event.service,
+        event.action,
+        event.outcome.value,
+        event.error_code,
+        event.error_message,
+        event.region,
+        event.source_ip,
+        _actor_to_json(event.actor),
+        _resources_to_json(event.resources),
+        _json_to_storage(event.attributes),
+        actor_key[0] if actor_key is not None else None,
+        actor_key[1] if actor_key is not None else None,
+        actor_key[2] if actor_key is not None else None,
+        actor_key[3] if actor_key is not None else None,
+    )
+
+
+def _history_signal_from_row(row: sqlite3.Row) -> Signal:
+    """Rebuild a history signal with the same mapping as incident signals.
+
+    The event identity column substitutes for the incident table's event ID
+    column; every other field shares conversion behavior, including the
+    empty ``raw_event`` that incident reloads already use.
+    """
+
+    event = NormalizedEvent(
+        timestamp=_datetime_from_storage(row["event_timestamp"]),
+        provider=_required_str(row["provider"]),
+        service=_required_str(row["service"]),
+        action=_required_str(row["action"]),
+        event_id=_required_str(row["event_identity"]),
+        outcome=EventOutcome(_required_str(row["outcome"])),
+        error_code=_optional_str(row["error_code"]),
+        error_message=_optional_str(row["error_message"]),
+        region=_optional_str(row["region"]),
+        source_ip=_optional_str(row["source_ip"]),
+        actor=_actor_from_json(row["actor_json"]),
+        resources=_resources_from_json(row["resources_json"]),
+        attributes=_object_from_json(row["attributes_json"]),
+        raw_event={},
+    )
+    return Signal(
+        signal_id=_required_str(row["signal_id"]),
+        rule_id=_required_str(row["rule_id"]),
+        title=_required_str(row["title"]),
+        description=_required_str(row["description"]),
+        severity=SignalSeverity(_required_str(row["severity"])),
+        source_event=event,
+        reason=_required_str(row["reason"]),
+    )
 
 
 def _signal_from_row(row: sqlite3.Row) -> Signal:

@@ -337,8 +337,8 @@ trailweaver --database ~/.local/share/trailweaver/incidents.sqlite3 \
 Analysis output contains only stage counts: source records, accepted records, failures,
 duplicates, analyzed events, signals, correlations, created incidents, and persisted
 incidents. Raw CloudTrail payloads are never printed. A successful benign analysis may
-report zero signals and incidents. Repeating analysis remains non-idempotent and may
-persist another independently identified incident.
+report zero signals and incidents. Repeating analysis of already-processed evidence
+produces no new incidents; only genuinely new evidence creates new output.
 
 Runtime environment variables use the `TRAILWEAVER_` prefix:
 
@@ -411,7 +411,9 @@ An empty `Records` array is a valid zero-event result.
 Within one ingestion operation, the first successfully parsed event with a given
 non-empty `event_id` wins. Later records with that ID are reported as duplicates rather
 than parser failures. Events without IDs are retained and are not falsely deduplicated.
-This is deliberately not cross-file or database-backed deduplication. Accepted events
+This ingestion scope is deliberately not cross-file deduplication; persistent
+cross-run idempotency lives in the analysis runner's event ledger downstream.
+Accepted events
 remain in source order, including when timestamps are non-chronological or records in
 between fail.
 
@@ -503,24 +505,46 @@ demo dedup state so the synthetic demo replays from scratch. Concurrent
 exactly-once processing is not claimed: genuinely concurrent runs may both process
 the same event.
 
+Successfully produced signals are also retained as bounded, actor- and
+event-time-indexed history (identity and normalized fields only, never raw
+evidence), so later runs can correlate fresh signals against earlier ones —
+including files that arrive out of order, where rule temporal semantics
+permit. Each distinct correlation evidence set emits at most one durable
+incident: the deterministic evidence identity is persisted atomically with
+its incident, so rediscovery never duplicates output. Production workspace
+clearing preserves signal history and emitted identities; demo reset clears
+demo history so the synthetic demo replays. Evidence without a trustworthy
+event ID cannot offer exact dedup and may repeat output rather than risk
+suppression. Pre-existing databases are not backfilled, and no
+distributed or streaming exactly-once behavior is claimed.
+
 Ingestion preserves source order. The runner creates a separate analysis ordering by
 event timestamp, retaining original source position for equal timestamps. Detection
 runs once per event in that order and preserves rule-pack order. The existing
-correlation engine receives the resulting signal batch and remains authoritative for
-sequence windows, actor matching, and signal reuse.
+correlation engine receives the resulting signal batch plus bounded historical
+signals — same-actor signals from a symmetric event-time window around the current
+evidence — and remains authoritative for sequence windows, actor matching, and
+signal reuse. Out-of-order file arrival therefore still completes sequences whose
+temporal order the rule accepts.
 
-Generated incidents are saved sequentially through the repository contract. Each
-successful save is durable according to that repository, but the contract has no atomic
-multi-incident transaction: if a later save fails, earlier saves remain and subsequent
-incidents are not attempted. Repository failures propagate and are never reported as a
-successful execution.
+Generated incidents are saved through an atomic per-correlation operation pairing
+each incident with a deterministic correlation-identity tombstone: exactly one
+durable incident results per distinct evidence set, and a later save failure leaves
+earlier commits intact without a giant multi-incident transaction. Repository
+failures propagate and are never reported as a successful execution. Successfully
+produced signals are stored in a bounded signal history (identity only, never raw
+evidence) after incidents persist, so later runs can correlate against them.
 
-Reprocessing is **not idempotent**. CloudTrail event IDs are source-provided, but the
-existing `Signal`, `CorrelationMatch`, and `Incident` models generate new UUID4
-identities on each execution. Running the same source twice therefore normally creates
-and persists a second independently identified incident. An
+Reprocessing the same identified evidence does not create duplicate incidents:
+already-processed events are skipped, and already-emitted correlation evidence is
+recognized by its deterministic identity. CloudTrail event IDs are source-provided,
+while the existing `Signal`, `CorrelationMatch`, and `Incident` models generate new
+UUID4 identities on each execution; the durable tombstone, not the random IDs, is
+what prevents repeat output. An
 `IncidentAlreadyExistsError` is not treated as prior successful processing because a
-random ID collision does not prove evidence equivalence.
+random ID collision does not prove evidence equivalence. Evidence without a
+trustworthy event ID is always reprocessed and can yield repeat incidents; it is
+never silently suppressed.
 
 This pipeline is an in-process application primitive, not production-scale ingestion.
 It adds no POST/upload endpoint, frontend upload flow, live AWS access, background jobs,

@@ -98,7 +98,7 @@ def test_sqlite_clear_removes_incidents_and_related_rows_without_touching_schema
         }
     finally:
         connection.close()
-    assert version == 3
+    assert version == 4
     assert {"incidents", "correlation_matches", "signals"} <= tables
 
     repository.save_incident(create_demo_incident())
@@ -146,6 +146,19 @@ def test_production_clear_endpoint_empties_workspace_and_stays_usable(
     assert client.get("/api/v1/incidents").json() == []
     assert client.get(f"/api/v1/incidents/{incident_id}").status_code == 404
     assert _child_row_counts(database) == (0, 0)
+
+    connection = sqlite3.connect(database)
+    try:
+        history_rows = connection.execute(
+            "SELECT COUNT(*) FROM signal_history"
+        ).fetchone()[0]
+        tombstone_rows = connection.execute(
+            "SELECT COUNT(*) FROM emitted_correlations"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert history_rows == 3
+    assert tombstone_rows == 1
 
     repeated = client.post(
         "/api/v1/analyses/file", content=payload, headers=headers

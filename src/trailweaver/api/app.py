@@ -73,6 +73,11 @@ from trailweaver.event_ledger import (
 )
 from trailweaver.observability import log_event
 from trailweaver.runtime import validate_cors_origins
+from trailweaver.signal_history import (
+    InMemorySignalHistory,
+    SignalHistoryError,
+    SignalHistoryRepository,
+)
 
 _NO_CLOUD_CONTEXT_REASON = (
     "Blast-radius analysis is unavailable because no cloud context is loaded."
@@ -111,6 +116,7 @@ def create_app(
     analysis_runner: InvestigationRunner | None = None,
     analysis_run_repository: AnalysisRunRepository | None = None,
     event_ledger_repository: EventLedgerRepository | None = None,
+    signal_history_repository: SignalHistoryRepository | None = None,
     enable_analysis: bool = True,
     enable_s3_analysis: bool = True,
     demo_mode: bool = False,
@@ -143,6 +149,15 @@ def create_app(
             else InMemoryEventLedger()
         )
     )
+    signal_history = (
+        signal_history_repository
+        if signal_history_repository is not None
+        else (
+            incident_repository
+            if isinstance(incident_repository, SQLiteIncidentRepository)
+            else InMemorySignalHistory()
+        )
+    )
     incident_service = (
         service
         if service is not None
@@ -160,6 +175,7 @@ def create_app(
                 incident_repository,
                 analysis_run_repository=run_repository,
                 event_ledger_repository=event_ledger,
+                signal_history_repository=signal_history,
             )
         )
     application = FastAPI(
@@ -182,6 +198,7 @@ def create_app(
 
     @application.exception_handler(AnalysisRunRepositoryError)
     @application.exception_handler(EventLedgerError)
+    @application.exception_handler(SignalHistoryError)
     @application.exception_handler(IncidentRepositoryError)
     async def repository_unavailable(
         _request: Request, error: IncidentRepositoryError
@@ -347,11 +364,15 @@ def create_app(
             if isinstance(incident_repository, InMemoryIncidentRepository):
                 incident_repository.clear_incidents()
                 # Demo replay support: the synthetic demo must process its
-                # fixture again from scratch, so demo event-dedup state resets
-                # here too. Production workspace clearing deliberately keeps
-                # dedup history; run history is preserved in both cases.
+                # fixture again from scratch, so demo event-dedup and signal
+                # history state reset here too. Production workspace clearing
+                # deliberately keeps dedup history; run history is preserved
+                # in both cases.
                 if isinstance(event_ledger, InMemoryEventLedger):
                     event_ledger.clear()
+                if isinstance(signal_history, InMemorySignalHistory):
+                    signal_history.clear()
+                    incident_repository.clear_emitted_correlations()
                 return DemoResetResponse(status="ok", incidents=0)
             raise HTTPException(
                 status_code=503,

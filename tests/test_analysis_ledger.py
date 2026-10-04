@@ -176,6 +176,8 @@ def test_v1_database_migrates_atomically_and_preserves_incident_evidence(tmp_pat
     original = SQLiteIncidentRepository(database)
     original.save_incident(incident)
     with sqlite3.connect(database) as connection:
+        connection.execute("DROP TABLE signal_history")
+        connection.execute("DROP TABLE emitted_correlations")
         connection.execute("DROP TABLE analysis_run_events")
         connection.execute("DROP TABLE events")
         connection.execute("DROP TABLE analysis_runs")
@@ -187,7 +189,7 @@ def test_v1_database_migrates_atomically_and_preserves_incident_evidence(tmp_pat
     assert migrated.get_incident(incident.incident_id).timeline
     assert migrated.list_runs() == ()
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone() == (3,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (4,)
     assert SQLiteIncidentRepository(database).list_runs() == ()
 
 

@@ -17,14 +17,19 @@ from trailweaver.analysis_runs import (
     AnalysisRunStatus,
     AnalysisSourceType,
 )
-from trailweaver.api.service import IncidentRepository
+from trailweaver.api.service import IncidentRepository, SaveIncidentOutcome
 from trailweaver.cloudtrail_ingestion import (
     DEFAULT_MAX_SOURCE_BYTES,
     CloudTrailIngestionResult,
     ingest_cloudtrail_file,
     ingest_cloudtrail_json,
 )
-from trailweaver.correlation import CorrelationEngine, CorrelationMatch
+from trailweaver.correlation import (
+    CorrelationEngine,
+    CorrelationMatch,
+    actor_correlation_key,
+    correlation_evidence_key,
+)
 from trailweaver.correlation_rules import AWS_CORRELATION_RULES
 from trailweaver.detection import DetectionEngine
 from trailweaver.event_ledger import (
@@ -36,6 +41,7 @@ from trailweaver.incidents import Incident, IncidentFactory
 from trailweaver.models import NormalizedEvent
 from trailweaver.observability import log_event, safe_source_label
 from trailweaver.rules import AWS_RULES
+from trailweaver.signal_history import InMemorySignalHistory, SignalHistoryRepository
 from trailweaver.signals import Signal
 
 _LOGGER = logging.getLogger(__name__)
@@ -86,6 +92,7 @@ class InvestigationRunner:
         incident_repository: IncidentRepository,
         analysis_run_repository: AnalysisRunRepository | None = None,
         event_ledger_repository: EventLedgerRepository | None = None,
+        signal_history_repository: SignalHistoryRepository | None = None,
     ) -> None:
         self._detection_engine = detection_engine
         self._correlation_engine = correlation_engine
@@ -100,6 +107,11 @@ class InvestigationRunner:
             event_ledger_repository
             if event_ledger_repository is not None
             else InMemoryEventLedger()
+        )
+        self._signal_history_repository = (
+            signal_history_repository
+            if signal_history_repository is not None
+            else InMemorySignalHistory()
         )
 
     def run_cloudtrail_json(
@@ -231,8 +243,15 @@ class InvestigationRunner:
                 failure_phase=AnalysisFailurePhase.DETECTION,
             )
             raise
+        # Cross-run correlation: historical candidates bounded by actor keys
+        # and the rules' temporal window join this run's fresh signals. A
+        # history read failure propagates with no FAILED row, mirroring a
+        # ledger read failure: correlation never meaningfully began.
+        historical_signals = self._load_historical_signals(signals)
+        historical_ids = {id(signal) for signal in historical_signals}
+        combined_signals = _deduplicate_signals(historical_signals, signals)
         try:
-            correlations = self._correlation_engine.evaluate(signals)
+            correlations = self._correlation_engine.evaluate(combined_signals)
         except Exception:
             self._record_failure(
                 analysis_run_id,
@@ -254,22 +273,19 @@ class InvestigationRunner:
             )
             raise
 
-        log_event(
-            _LOGGER,
-            logging.INFO,
-            "investigation_analyzed",
-            source=source,
-            events=len(analyzed_events),
-            signals=len(signals),
-            correlations=len(correlations),
-            incidents=len(incidents),
-        )
-
         persisted_incidents: list[Incident] = []
+        novel_correlations: list[CorrelationMatch] = []
         try:
-            for incident in incidents:
-                self._incident_repository.save_incident(incident)
-                persisted_incidents.append(incident)
+            for correlation, incident in zip(correlations, incidents):
+                outcome = self._incident_repository.save_incident_if_correlation_new(
+                    incident,
+                    correlation_evidence_key(
+                        correlation.rule_id, correlation.signals
+                    ),
+                )
+                if outcome is SaveIncidentOutcome.CREATED:
+                    persisted_incidents.append(incident)
+                    novel_correlations.append(correlation)
         except Exception as error:
             log_event(
                 _LOGGER,
@@ -289,6 +305,32 @@ class InvestigationRunner:
             )
             raise
 
+        log_event(
+            _LOGGER,
+            logging.INFO,
+            "investigation_analyzed",
+            source=source,
+            events=len(analyzed_events),
+            signals=len(signals),
+            correlations=len(correlations),
+            incidents=len(incidents),
+            current_signals=len(signals),
+            historical_candidates=len(historical_signals),
+            cross_run_correlations=sum(
+                1
+                for match in novel_correlations
+                if any(
+                    id(signal) in historical_ids for signal in match.signals
+                )
+            ),
+        )
+
+        # Durable signal history covers this run's identified signals only
+        # after incidents persist. A failure here propagates with no FAILED
+        # row: the run did not fail in any M30 phase, persisted incidents
+        # remain, and unacknowledged evidence stays retryable.
+        self._signal_history_repository.store_signals(signals)
+
         analysis_run = AnalysisRun(
             analysis_run_id=analysis_run_id,
             source_type=source_type,
@@ -298,8 +340,8 @@ class InvestigationRunner:
             records_seen=ingestion_result.total_records,
             records_accepted=ingestion_result.accepted_records,
             signals_created=len(signals),
-            correlations_created=len(correlations),
-            incidents_created=len(incidents),
+            correlations_created=len(novel_correlations),
+            incidents_created=len(persisted_incidents),
         )
         self._analysis_run_repository.complete_run(analysis_run)
         # Event identities are acknowledged only after successful processing:
@@ -328,9 +370,35 @@ class InvestigationRunner:
             ingestion_result=ingestion_result,
             analyzed_events=analyzed_events,
             signals=signals,
-            correlations=correlations,
-            incidents=incidents,
+            correlations=tuple(novel_correlations),
+            incidents=tuple(persisted_incidents),
             persisted_incidents=tuple(persisted_incidents),
+        )
+
+    def _load_historical_signals(
+        self, signals: tuple[Signal, ...]
+    ) -> tuple[Signal, ...]:
+        """Load bounded historical candidates for the current signals.
+
+        The lookup spans each rule's temporal window symmetrically around the
+        current signals' event times, restricted to the actors those signals
+        implicate, so out-of-order file arrival still completes sequences
+        without scanning the whole history.
+        """
+
+        if not signals:
+            return ()
+        timestamps = [signal.timestamp for signal in signals]
+        window = self._correlation_engine.history_window
+        actors = {
+            key
+            for signal in signals
+            if (key := actor_correlation_key(signal.source_event)) is not None
+        }
+        return self._signal_history_repository.candidate_signals(
+            actors=actors,
+            start=min(timestamps) - window,
+            end=max(timestamps) + window,
         )
 
     def _record_failure(
@@ -368,6 +436,7 @@ def create_default_investigation_runner(
     incident_repository: IncidentRepository,
     analysis_run_repository: AnalysisRunRepository | None = None,
     event_ledger_repository: EventLedgerRepository | None = None,
+    signal_history_repository: SignalHistoryRepository | None = None,
 ) -> InvestigationRunner:
     """Return the canonical runner configured with TrailWeaver's AWS rule packs."""
 
@@ -386,7 +455,48 @@ def create_default_investigation_runner(
             if event_ledger_repository is not None
             else InMemoryEventLedger()
         ),
+        signal_history_repository=(
+            signal_history_repository
+            if signal_history_repository is not None
+            else InMemorySignalHistory()
+        ),
     )
+
+
+def _logical_signal_key(signal: Signal) -> tuple[str, str, str] | None:
+    """Return the stable identity shared by re-detections of one signal."""
+
+    event = signal.source_event
+    if (
+        event.event_id is None
+        or not event.event_id.strip()
+        or not event.provider
+        or not event.provider.strip()
+    ):
+        return None
+    return (event.provider, event.event_id, signal.rule_id)
+
+
+def _deduplicate_signals(
+    historical: tuple[Signal, ...], current: tuple[Signal, ...]
+) -> tuple[Signal, ...]:
+    """Combine history with fresh signals without duplicating logical copies.
+
+    A retried run redetects events whose identities were never acknowledged;
+    when the historical representation already exists, it wins because its
+    signal ID may already participate in durable evidence. Signals without a
+    trustworthy event ID can never collide and are always kept.
+    """
+
+    seen: set[tuple[str, str, str]] = set()
+    combined: list[Signal] = []
+    for signal in (*historical, *current):
+        key = _logical_signal_key(signal)
+        if key is None or key not in seen:
+            combined.append(signal)
+            if key is not None:
+                seen.add(key)
+    return tuple(combined)
 
 
 def _order_events_for_analysis(
