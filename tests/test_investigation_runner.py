@@ -10,7 +10,17 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from trailweaver.analysis_runs import AnalysisRun, AnalysisSourceType
+import trailweaver.api.execution as execution_module
+from trailweaver.analysis_ledger import (
+    AnalysisRunRepositoryError,
+    InMemoryAnalysisRunRepository,
+)
+from trailweaver.analysis_runs import (
+    AnalysisFailurePhase,
+    AnalysisRun,
+    AnalysisRunStatus,
+    AnalysisSourceType,
+)
 from trailweaver.api.app import create_app
 from trailweaver.api.execution import (
     InvestigationExecutionResult,
@@ -259,6 +269,194 @@ def test_analysis_stage_failures_propagate_without_completed_run(
         runner.run_cloudtrail_file(ATTACK_FIXTURE)
 
 
+def test_running_record_exists_before_detection_and_success_completes_same_id() -> None:
+    ledger = InMemoryAnalysisRunRepository()
+
+    class InspectingDetectionEngine(DetectionEngine):
+        def evaluate(self, event):  # type: ignore[no-untyped-def]
+            records = ledger.list_runs()
+            assert len(records) == 1
+            assert records[0].status is AnalysisRunStatus.RUNNING
+            return super().evaluate(event)
+
+    runner = InvestigationRunner(
+        detection_engine=InspectingDetectionEngine(AWS_RULES),
+        correlation_engine=CorrelationEngine(AWS_CORRELATION_RULES),
+        incident_factory=IncidentFactory(),
+        incident_repository=InMemoryIncidentRepository(),
+        analysis_run_repository=ledger,
+    )
+
+    result = runner.run_cloudtrail_file(ATTACK_FIXTURE)
+    record = ledger.list_runs()[0]
+
+    assert record.status is AnalysisRunStatus.COMPLETED
+    assert record.analysis_run_id == result.analysis_run.analysis_run_id
+    assert record.started_at == result.analysis_run.started_at
+    assert record.finished_at == result.analysis_run.completed_at
+    assert (record.signals_created, record.correlations_created, record.incidents_created) == (
+        3,
+        1,
+        1,
+    )
+
+
+@pytest.mark.parametrize(
+    ("failure_stage", "expected_phase", "expected_counts"),
+    (
+        ("ordering", AnalysisFailurePhase.EVENT_ORDERING, (None, None, None)),
+        ("detection", AnalysisFailurePhase.DETECTION, (None, None, None)),
+        ("correlation", AnalysisFailurePhase.CORRELATION, (3, None, None)),
+        ("factory", AnalysisFailurePhase.INCIDENT_CREATION, (3, 1, None)),
+    ),
+)
+def test_stage_failures_record_typed_phase_and_only_known_counts(
+    failure_stage: str,
+    expected_phase: AnalysisFailurePhase,
+    expected_counts: tuple[int | None, int | None, int | None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ledger = InMemoryAnalysisRunRepository()
+    if failure_stage == "ordering":
+        def fail_ordering(_events):  # type: ignore[no-untyped-def]
+            raise RuntimeError("ordering failed")
+
+        monkeypatch.setattr(execution_module, "_order_events_for_analysis", fail_ordering)
+    runner = InvestigationRunner(
+        detection_engine=(
+            _FailingDetectionEngine()
+            if failure_stage == "detection"
+            else DetectionEngine(AWS_RULES)
+        ),  # type: ignore[arg-type]
+        correlation_engine=(
+            _FailingCorrelationEngine()
+            if failure_stage == "correlation"
+            else CorrelationEngine(AWS_CORRELATION_RULES)
+        ),  # type: ignore[arg-type]
+        incident_factory=(
+            _FailingIncidentFactory()
+            if failure_stage == "factory"
+            else IncidentFactory()
+        ),
+        incident_repository=InMemoryIncidentRepository(),
+        analysis_run_repository=ledger,
+    )
+
+    with pytest.raises(RuntimeError):
+        runner.run_cloudtrail_file(ATTACK_FIXTURE)
+
+    record = ledger.list_runs()[0]
+    assert record.status is AnalysisRunStatus.FAILED
+    assert record.failure_phase is expected_phase
+    assert (record.signals_created, record.correlations_created, record.incidents_created) == (
+        expected_counts
+    )
+
+
+def test_incident_persistence_failure_records_all_created_counts() -> None:
+    ledger = InMemoryAnalysisRunRepository()
+    incidents = _FailOnSecondSaveRepository()
+    runner = create_default_investigation_runner(
+        incidents, analysis_run_repository=ledger
+    )
+
+    with pytest.raises(RuntimeError, match="repository unavailable"):
+        runner.run_cloudtrail_json(json.dumps(_two_actor_attack_document()))
+
+    record = ledger.list_runs()[0]
+    assert record.status is AnalysisRunStatus.FAILED
+    assert record.failure_phase is AnalysisFailurePhase.INCIDENT_PERSISTENCE
+    assert record.signals_created == 6
+    assert record.correlations_created == 2
+    assert record.incidents_created == 2
+    assert len(incidents.list_incidents()) == 1
+
+
+def test_secondary_fail_run_error_does_not_mask_original_detection_error() -> None:
+    class FailingLedger(InMemoryAnalysisRunRepository):
+        def fail_run(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            raise AnalysisRunRepositoryError("secondary storage secret")
+
+    ledger = FailingLedger()
+    runner = InvestigationRunner(
+        detection_engine=_FailingDetectionEngine(),  # type: ignore[arg-type]
+        correlation_engine=CorrelationEngine(AWS_CORRELATION_RULES),
+        incident_factory=IncidentFactory(),
+        incident_repository=InMemoryIncidentRepository(),
+        analysis_run_repository=ledger,
+    )
+
+    with pytest.raises(RuntimeError, match="detection failed"):
+        runner.run_cloudtrail_file(ATTACK_FIXTURE)
+
+    assert ledger.list_runs()[0].status is AnalysisRunStatus.RUNNING
+
+
+def test_completion_failure_returns_no_success_and_keeps_persisted_incident() -> None:
+    class FailingLedger(InMemoryAnalysisRunRepository):
+        def complete_run(self, run: AnalysisRun) -> None:
+            del run
+            raise AnalysisRunRepositoryError("completion unavailable")
+
+    ledger = FailingLedger()
+    incidents = InMemoryIncidentRepository()
+    runner = create_default_investigation_runner(
+        incidents, analysis_run_repository=ledger
+    )
+
+    with pytest.raises(AnalysisRunRepositoryError, match="completion unavailable"):
+        runner.run_cloudtrail_file(ATTACK_FIXTURE)
+
+    assert len(incidents.list_incidents()) == 1
+    assert ledger.list_runs()[0].status is AnalysisRunStatus.RUNNING
+
+
+def test_start_failure_prevents_detection_and_incident_persistence() -> None:
+    class StartFailingLedger(InMemoryAnalysisRunRepository):
+        def start_run(self, record):  # type: ignore[no-untyped-def]
+            del record
+            raise AnalysisRunRepositoryError("start unavailable")
+
+    class CountingDetectionEngine(DetectionEngine):
+        calls = 0
+
+        def evaluate(self, event):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            return super().evaluate(event)
+
+    detector = CountingDetectionEngine(AWS_RULES)
+    incidents = InMemoryIncidentRepository()
+    runner = InvestigationRunner(
+        detection_engine=detector,
+        correlation_engine=CorrelationEngine(AWS_CORRELATION_RULES),
+        incident_factory=IncidentFactory(),
+        incident_repository=incidents,
+        analysis_run_repository=StartFailingLedger(),
+    )
+
+    with pytest.raises(AnalysisRunRepositoryError, match="start unavailable"):
+        runner.run_cloudtrail_file(ATTACK_FIXTURE)
+
+    assert detector.calls == 0
+    assert incidents.list_incidents() == ()
+
+
+def test_same_evidence_creates_distinct_durable_run_records(tmp_path: Path) -> None:
+    repository = SQLiteIncidentRepository(tmp_path / "two-runs.sqlite3")
+    runner = create_default_investigation_runner(
+        repository, analysis_run_repository=repository
+    )
+
+    first = runner.run_cloudtrail_file(ATTACK_FIXTURE)
+    second = runner.run_cloudtrail_file(ATTACK_FIXTURE)
+
+    assert first.analysis_run.analysis_run_id != second.analysis_run.analysis_run_id
+    assert tuple(record.analysis_run_id for record in repository.list_runs()) == (
+        first.analysis_run.analysis_run_id,
+        second.analysis_run.analysis_run_id,
+    )
+
+
 def test_reprocessing_same_source_is_not_idempotent_with_random_domain_ids() -> None:
     repository = InMemoryIncidentRepository()
     runner = create_default_investigation_runner(repository)
@@ -334,7 +532,7 @@ def test_sqlite_reopen_and_existing_api_derive_complete_investigation(
     database = tmp_path / "investigations.sqlite3"
     first_repository = SQLiteIncidentRepository(database)
     result = create_default_investigation_runner(
-        first_repository
+        first_repository, analysis_run_repository=first_repository
     ).run_cloudtrail_file(ATTACK_FIXTURE)
     incident = result.incidents[0]
     expected_signal_ids = tuple(entry.signal_id for entry in incident.timeline)
@@ -343,7 +541,10 @@ def test_sqlite_reopen_and_existing_api_derive_complete_investigation(
     reopened = reopened_repository.get_incident(incident.incident_id)
     assert reopened is not None
     assert reopened.incident_id == incident.incident_id
-    assert result.analysis_run.analysis_run_id.encode() not in database.read_bytes()
+    assert (
+        reopened_repository.get_run(result.analysis_run.analysis_run_id).status.value
+        == "completed"
+    )
     assert tuple(entry.signal_id for entry in reopened.timeline) == expected_signal_ids
     assert all(
         signal.source_event.raw_event == {}

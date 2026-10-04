@@ -15,6 +15,8 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from trailweaver.analysis_ledger import InMemoryAnalysisRunRepository
+from trailweaver.analysis_runs import AnalysisRunStatus
 from trailweaver.api.app import create_app
 from trailweaver.api.demo import create_demo_app, create_demo_incident
 from trailweaver.api.service import InMemoryIncidentRepository
@@ -96,7 +98,7 @@ def test_sqlite_clear_removes_incidents_and_related_rows_without_touching_schema
         }
     finally:
         connection.close()
-    assert version == 1
+    assert version == 2
     assert {"incidents", "correlation_matches", "signals"} <= tables
 
     repository.save_incident(create_demo_incident())
@@ -228,5 +230,43 @@ def test_demo_workspace_clear_covers_the_same_in_memory_operation() -> None:
     response = client.post("/api/v1/workspace/clear")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "incidents": 0}
-    assert client.get("/api/v1/incidents").json() == []
+
+
+def test_workspace_clear_preserves_sqlite_analysis_run_history(tmp_path: Path) -> None:
+    database = tmp_path / "history.sqlite3"
+    repository = SQLiteIncidentRepository(database)
+    client = _ApiClient(create_app(repository=repository))
+    response = client.post(
+        "/api/v1/analyses/file",
+        content=_fixture("account-compromise-sequence.json"),
+        headers={"Content-Type": "application/json"},
+    )
+    run_id = response.json()["analysis_run_id"]
+
+    assert client.post("/api/v1/workspace/clear").status_code == 200
+    assert repository.list_incidents() == ()
+    assert repository.get_run(run_id).status is AnalysisRunStatus.COMPLETED
+
+
+def test_demo_reset_preserves_separate_in_memory_run_history() -> None:
+    incident_repository = InMemoryIncidentRepository()
+    ledger = InMemoryAnalysisRunRepository()
+    client = _ApiClient(
+        create_app(
+            repository=incident_repository,
+            analysis_run_repository=ledger,
+            demo_mode=True,
+            enable_s3_analysis=False,
+            enable_demo_reset=True,
+        )
+    )
+    client.post(
+        "/api/v1/analyses/file",
+        content=_fixture("account-compromise-sequence.json"),
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert client.post("/api/v1/demo/reset").status_code == 200
+    assert incident_repository.list_incidents() == ()
+    assert len(ledger.list_runs()) == 1
+    assert ledger.list_runs()[0].status is AnalysisRunStatus.COMPLETED

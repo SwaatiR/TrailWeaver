@@ -9,6 +9,7 @@ from typing import TextIO
 
 import uvicorn
 
+from trailweaver.analysis_ledger import AnalysisRunRepositoryError
 from trailweaver.api.app import create_persistent_app
 from trailweaver.api.execution import (
     InvestigationExecutionResult,
@@ -71,7 +72,9 @@ def main(
     try:
         if arguments.command == "analyze-file":
             repository = SQLiteIncidentRepository(database_path)
-            result = create_default_investigation_runner(repository).run_cloudtrail_file(
+            result = create_default_investigation_runner(
+                repository, analysis_run_repository=repository
+            ).run_cloudtrail_file(
                 arguments.path,
                 source_label=arguments.source_label,
                 max_source_bytes=arguments.max_source_bytes,
@@ -81,7 +84,9 @@ def main(
 
         if arguments.command == "analyze-s3":
             repository = SQLiteIncidentRepository(database_path)
-            runner = create_default_investigation_runner(repository)
+            runner = create_default_investigation_runner(
+                repository, analysis_run_repository=repository
+            )
             adapter = (
                 S3CloudTrailAdapter(s3_client)
                 if s3_client is not None
@@ -125,7 +130,7 @@ def main(
         )
         print(f"Source error: {error}", file=errors)
         return EXIT_SOURCE_ERROR
-    except (IncidentRepositoryError, OSError) as error:
+    except (AnalysisRunRepositoryError, IncidentRepositoryError, OSError) as error:
         log_event(
             _LOGGER,
             logging.ERROR,

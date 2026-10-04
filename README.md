@@ -365,9 +365,11 @@ correlation metadata plus ordered signals and the normalized event fields requir
 reconstruct the existing investigation API. Signal IDs, event IDs, enums, and
 timezone-aware timestamps are preserved. `raw_event` payloads are intentionally not
 copied into this repository; source-record ownership is deferred. SQLite uses the
-standard library and an explicit schema version (`PRAGMA user_version`); a new
-database initializes automatically, compatible files reopen safely, and unknown or
-unversioned schemas fail without destructive replacement.
+standard library and an explicit schema version (`PRAGMA user_version`). New databases
+initialize at schema v2, and existing v1 incident databases upgrade automatically in one
+transaction without changing their incident, correlation, or signal evidence. The new
+analysis ledger starts empty after that migration; historical runs are not inferred.
+Unknown or unversioned schemas fail without destructive replacement.
 
 Risk, MITRE ATT&CK, the observed attack graph, and investigation guidance remain
 deterministic derived views of the stored incident evidence. `CloudContext` is
@@ -456,7 +458,10 @@ from trailweaver.api.execution import create_default_investigation_runner
 from trailweaver.api.sqlite_repository import SQLiteIncidentRepository
 
 repository = SQLiteIncidentRepository("investigations.sqlite3")
-runner = create_default_investigation_runner(repository)
+runner = create_default_investigation_runner(
+    repository,
+    analysis_run_repository=repository,
+)
 result = runner.run_cloudtrail_file("export.json", source_label="analyst-upload-42")
 print(result.analyzed_event_count, result.signal_count, result.incident_count)
 ```
@@ -476,9 +481,17 @@ invocation, while a CloudTrail `event_id` identifies underlying event evidence: 
 event may therefore appear in multiple distinct runs. Runs do not own incidents, contain
 raw evidence, or participate in deduplication.
 
-M29 run information exists only on the successful in-memory execution result. It is not
-stored by the in-memory or SQLite incident repositories and is lost across process
-restart; persistent run and ingestion history belongs to the later ledger milestone.
+Each attempt that reaches `run_ingestion_result()` is also written to a separate
+analysis-run ledger. Its immutable snapshots move from `RUNNING` to either `COMPLETED`
+or `FAILED`, with a typed failure phase and only the counts known at that point. Source
+labels are bounded, sanitized display provenance and may still contain operational
+naming information. They are not deduplication keys. The successful `AnalysisRun`
+remains a completed-only domain fact; it is not mutable lifecycle state.
+
+SQLite retains ledger history across restarts. A process crash can intentionally leave a
+`RUNNING` record, which is preserved as-is on reopen; automatic recovery and stale-run
+reconciliation are deferred. Clearing a workspace or resetting the demo removes
+incidents but does not delete analysis-run history.
 
 Ingestion preserves source order. The runner creates a separate analysis ordering by
 event timestamp, retaining original source position for equal timestamps. Detection

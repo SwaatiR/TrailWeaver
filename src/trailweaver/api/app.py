@@ -11,6 +11,11 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from trailweaver.analysis_ledger import (
+    AnalysisRunRepository,
+    AnalysisRunRepositoryError,
+    InMemoryAnalysisRunRepository,
+)
 from trailweaver.api.analysis import (
     ALLOWED_UPLOAD_CONTENT_TYPES,
     MAX_WEB_SOURCE_BYTES,
@@ -99,6 +104,7 @@ def create_app(
     service: IncidentAnalysisService | None = None,
     cors_origins: Iterable[str] | None = None,
     analysis_runner: InvestigationRunner | None = None,
+    analysis_run_repository: AnalysisRunRepository | None = None,
     enable_analysis: bool = True,
     enable_s3_analysis: bool = True,
     demo_mode: bool = False,
@@ -113,6 +119,15 @@ def create_app(
     incident_repository = (
         repository if repository is not None else InMemoryIncidentRepository()
     )
+    run_repository = (
+        analysis_run_repository
+        if analysis_run_repository is not None
+        else (
+            incident_repository
+            if isinstance(incident_repository, SQLiteIncidentRepository)
+            else InMemoryAnalysisRunRepository()
+        )
+    )
     incident_service = (
         service
         if service is not None
@@ -126,7 +141,10 @@ def create_app(
         runner = (
             analysis_runner
             if analysis_runner is not None or service is not None
-            else create_default_investigation_runner(incident_repository)
+            else create_default_investigation_runner(
+                incident_repository,
+                analysis_run_repository=run_repository,
+            )
         )
     application = FastAPI(
         title="TrailWeaver API",
@@ -146,6 +164,7 @@ def create_app(
         allow_headers=["Accept", "Content-Type"],
     )
 
+    @application.exception_handler(AnalysisRunRepositoryError)
     @application.exception_handler(IncidentRepositoryError)
     async def repository_unavailable(
         _request: Request, error: IncidentRepositoryError
@@ -437,8 +456,10 @@ def create_persistent_app(
     and the default ``app`` never creates a database.
     """
 
+    repository = SQLiteIncidentRepository(database_path)
     return create_app(
-        repository=SQLiteIncidentRepository(database_path),
+        repository=repository,
+        analysis_run_repository=repository,
         cloud_context=cloud_context,
         cors_origins=cors_origins,
     )

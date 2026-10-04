@@ -4,8 +4,19 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from os import PathLike
+from uuid import uuid4
 
-from trailweaver.analysis_runs import AnalysisRun, AnalysisSourceType
+from trailweaver.analysis_ledger import (
+    AnalysisRunRepository,
+    InMemoryAnalysisRunRepository,
+)
+from trailweaver.analysis_runs import (
+    AnalysisFailurePhase,
+    AnalysisRun,
+    AnalysisRunRecord,
+    AnalysisRunStatus,
+    AnalysisSourceType,
+)
 from trailweaver.api.service import IncidentRepository
 from trailweaver.cloudtrail_ingestion import (
     DEFAULT_MAX_SOURCE_BYTES,
@@ -68,11 +79,17 @@ class InvestigationRunner:
         correlation_engine: CorrelationEngine,
         incident_factory: IncidentFactory,
         incident_repository: IncidentRepository,
+        analysis_run_repository: AnalysisRunRepository | None = None,
     ) -> None:
         self._detection_engine = detection_engine
         self._correlation_engine = correlation_engine
         self._incident_factory = incident_factory
         self._incident_repository = incident_repository
+        self._analysis_run_repository = (
+            analysis_run_repository
+            if analysis_run_repository is not None
+            else InMemoryAnalysisRunRepository()
+        )
 
     def run_cloudtrail_json(
         self,
@@ -123,9 +140,26 @@ class InvestigationRunner:
         """
 
         started_at = datetime.now(UTC)
+        analysis_run_id = str(uuid4())
         source = safe_source_label(ingestion_result.source_label)
         if source is not None and not source.strip():
             source = None
+        self._analysis_run_repository.start_run(
+            AnalysisRunRecord(
+                analysis_run_id=analysis_run_id,
+                source_type=source_type,
+                source_label=source,
+                status=AnalysisRunStatus.RUNNING,
+                started_at=started_at,
+                finished_at=None,
+                records_seen=ingestion_result.total_records,
+                records_accepted=ingestion_result.accepted_records,
+                signals_created=None,
+                correlations_created=None,
+                incidents_created=None,
+                failure_phase=None,
+            )
+        )
         log_event(
             _LOGGER,
             logging.INFO,
@@ -136,17 +170,48 @@ class InvestigationRunner:
             failed=ingestion_result.failed_records,
             duplicates=ingestion_result.duplicate_records,
         )
-        analyzed_events = _order_events_for_analysis(ingestion_result.events)
-        signals = tuple(
-            signal
-            for event in analyzed_events
-            for signal in self._detection_engine.evaluate(event)
-        )
-        correlations = self._correlation_engine.evaluate(signals)
-        incidents = tuple(
-            self._incident_factory.create(correlation)
-            for correlation in correlations
-        )
+        try:
+            analyzed_events = _order_events_for_analysis(ingestion_result.events)
+        except Exception:
+            self._record_failure(
+                analysis_run_id,
+                failure_phase=AnalysisFailurePhase.EVENT_ORDERING,
+            )
+            raise
+        try:
+            signals = tuple(
+                signal
+                for event in analyzed_events
+                for signal in self._detection_engine.evaluate(event)
+            )
+        except Exception:
+            self._record_failure(
+                analysis_run_id,
+                failure_phase=AnalysisFailurePhase.DETECTION,
+            )
+            raise
+        try:
+            correlations = self._correlation_engine.evaluate(signals)
+        except Exception:
+            self._record_failure(
+                analysis_run_id,
+                failure_phase=AnalysisFailurePhase.CORRELATION,
+                signals_created=len(signals),
+            )
+            raise
+        try:
+            incidents = tuple(
+                self._incident_factory.create(correlation)
+                for correlation in correlations
+            )
+        except Exception:
+            self._record_failure(
+                analysis_run_id,
+                failure_phase=AnalysisFailurePhase.INCIDENT_CREATION,
+                signals_created=len(signals),
+                correlations_created=len(correlations),
+            )
+            raise
 
         log_event(
             _LOGGER,
@@ -174,17 +239,17 @@ class InvestigationRunner:
                 expected=len(incidents),
                 error_type=type(error).__name__,
             )
+            self._record_failure(
+                analysis_run_id,
+                failure_phase=AnalysisFailurePhase.INCIDENT_PERSISTENCE,
+                signals_created=len(signals),
+                correlations_created=len(correlations),
+                incidents_created=len(incidents),
+            )
             raise
 
-        log_event(
-            _LOGGER,
-            logging.INFO,
-            "investigation_completed",
-            source=source,
-            persisted=len(persisted_incidents),
-        )
-
         analysis_run = AnalysisRun(
+            analysis_run_id=analysis_run_id,
             source_type=source_type,
             source_label=source,
             started_at=started_at,
@@ -194,6 +259,15 @@ class InvestigationRunner:
             signals_created=len(signals),
             correlations_created=len(correlations),
             incidents_created=len(incidents),
+        )
+        self._analysis_run_repository.complete_run(analysis_run)
+
+        log_event(
+            _LOGGER,
+            logging.INFO,
+            "investigation_completed",
+            source=source,
+            persisted=len(persisted_incidents),
         )
 
         return InvestigationExecutionResult(
@@ -206,9 +280,40 @@ class InvestigationRunner:
             persisted_incidents=tuple(persisted_incidents),
         )
 
+    def _record_failure(
+        self,
+        analysis_run_id: str,
+        *,
+        failure_phase: AnalysisFailurePhase,
+        signals_created: int | None = None,
+        correlations_created: int | None = None,
+        incidents_created: int | None = None,
+    ) -> None:
+        """Best-effort terminal recording that never masks processing failures."""
+
+        try:
+            self._analysis_run_repository.fail_run(
+                analysis_run_id,
+                failed_at=datetime.now(UTC),
+                failure_phase=failure_phase,
+                signals_created=signals_created,
+                correlations_created=correlations_created,
+                incidents_created=incidents_created,
+            )
+        except Exception as error:  # noqa: BLE001 - secondary failure must never escape
+            log_event(
+                _LOGGER,
+                logging.ERROR,
+                "analysis_run_failure_recording_failed",
+                analysis_run_id=analysis_run_id,
+                failure_phase=failure_phase.value,
+                error_type=type(error).__name__,
+            )
+
 
 def create_default_investigation_runner(
     incident_repository: IncidentRepository,
+    analysis_run_repository: AnalysisRunRepository | None = None,
 ) -> InvestigationRunner:
     """Return the canonical runner configured with TrailWeaver's AWS rule packs."""
 
@@ -217,6 +322,11 @@ def create_default_investigation_runner(
         correlation_engine=CorrelationEngine(AWS_CORRELATION_RULES),
         incident_factory=IncidentFactory(),
         incident_repository=incident_repository,
+        analysis_run_repository=(
+            analysis_run_repository
+            if analysis_run_repository is not None
+            else InMemoryAnalysisRunRepository()
+        ),
     )
 
 

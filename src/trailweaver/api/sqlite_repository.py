@@ -7,6 +7,20 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
+from trailweaver.analysis_ledger import (
+    AnalysisRunRepositoryError,
+    DuplicateAnalysisRunError,
+    InvalidAnalysisRunTransitionError,
+    InvalidStoredAnalysisRunError,
+    validate_completion_identity,
+)
+from trailweaver.analysis_runs import (
+    AnalysisFailurePhase,
+    AnalysisRun,
+    AnalysisRunRecord,
+    AnalysisRunStatus,
+    AnalysisSourceType,
+)
 from trailweaver.api.service import IncidentAlreadyExistsError
 from trailweaver.correlation import CorrelationMatch
 from trailweaver.incidents import Incident
@@ -19,7 +33,58 @@ from trailweaver.models import (
 )
 from trailweaver.signals import Signal, SignalSeverity
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
+
+_ANALYSIS_RUNS_TABLE_SQL = """CREATE TABLE analysis_runs (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    analysis_run_id TEXT NOT NULL UNIQUE CHECK (length(trim(analysis_run_id)) > 0),
+    source_type TEXT NOT NULL CHECK (
+        source_type IN ('local_file', 'web_upload', 's3_object', 'direct_input')
+    ),
+    source_label TEXT CHECK (
+        source_label IS NULL OR (
+            length(trim(source_label)) > 0 AND length(source_label) <= 256
+        )
+    ),
+    status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+    started_at TEXT NOT NULL CHECK (length(started_at) > 0),
+    finished_at TEXT,
+    records_seen INTEGER NOT NULL CHECK (records_seen >= 0),
+    records_accepted INTEGER NOT NULL CHECK (
+        records_accepted >= 0 AND records_accepted <= records_seen
+    ),
+    signals_created INTEGER CHECK (signals_created >= 0),
+    correlations_created INTEGER CHECK (correlations_created >= 0),
+    incidents_created INTEGER CHECK (incidents_created >= 0),
+    failure_phase TEXT CHECK (failure_phase IN (
+        'event_ordering', 'detection', 'correlation',
+        'incident_creation', 'incident_persistence'
+    )),
+    CHECK (finished_at IS NULL OR finished_at >= started_at),
+    CHECK (
+        (status = 'running' AND finished_at IS NULL
+            AND signals_created IS NULL AND correlations_created IS NULL
+            AND incidents_created IS NULL AND failure_phase IS NULL)
+        OR
+        (status = 'completed' AND finished_at IS NOT NULL
+            AND signals_created IS NOT NULL AND correlations_created IS NOT NULL
+            AND incidents_created IS NOT NULL AND failure_phase IS NULL)
+        OR
+        (status = 'failed' AND finished_at IS NOT NULL AND failure_phase IS NOT NULL
+            AND (
+                (failure_phase IN ('event_ordering', 'detection')
+                    AND signals_created IS NULL AND correlations_created IS NULL
+                    AND incidents_created IS NULL)
+                OR (failure_phase = 'correlation' AND signals_created IS NOT NULL
+                    AND correlations_created IS NULL AND incidents_created IS NULL)
+                OR (failure_phase = 'incident_creation' AND signals_created IS NOT NULL
+                    AND correlations_created IS NOT NULL AND incidents_created IS NULL)
+                OR (failure_phase = 'incident_persistence'
+                    AND signals_created IS NOT NULL AND correlations_created IS NOT NULL
+                    AND incidents_created IS NOT NULL)
+            ))
+    )
+)"""
 
 
 class IncidentRepositoryError(RuntimeError):
@@ -71,6 +136,134 @@ class SQLiteIncidentRepository:
                 return tuple(incidents)
         except sqlite3.Error as error:
             raise IncidentRepositoryError("Unable to list persisted incidents") from error
+
+    def start_run(self, record: AnalysisRunRecord) -> None:
+        """Durably insert one RUNNING lifecycle record before analysis starts."""
+
+        if record.status is not AnalysisRunStatus.RUNNING:
+            raise InvalidAnalysisRunTransitionError("start_run requires a RUNNING record")
+        try:
+            with closing(self._connect()) as connection, connection:
+                connection.execute("BEGIN IMMEDIATE")
+                if connection.execute(
+                    "SELECT 1 FROM analysis_runs WHERE analysis_run_id = ?",
+                    (record.analysis_run_id,),
+                ).fetchone() is not None:
+                    raise DuplicateAnalysisRunError(
+                        f"Analysis run {record.analysis_run_id!r} already exists"
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO analysis_runs (
+                        analysis_run_id, source_type, source_label, status,
+                        started_at, finished_at, records_seen, records_accepted,
+                        signals_created, correlations_created, incidents_created,
+                        failure_phase
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    _record_to_storage(record),
+                )
+        except (DuplicateAnalysisRunError, InvalidAnalysisRunTransitionError):
+            raise
+        except (sqlite3.Error, TypeError, ValueError) as error:
+            raise AnalysisRunRepositoryError("Unable to start analysis run") from error
+
+    def complete_run(self, run: AnalysisRun) -> None:
+        """Atomically transition a compatible RUNNING row to COMPLETED."""
+
+        try:
+            with closing(self._connect()) as connection, connection:
+                connection.execute("BEGIN IMMEDIATE")
+                current = self._load_run(connection, run.analysis_run_id)
+                _require_running(current, run.analysis_run_id)
+                assert current is not None
+                validate_completion_identity(current, run)
+                record = AnalysisRunRecord(
+                    analysis_run_id=run.analysis_run_id,
+                    source_type=run.source_type,
+                    source_label=run.source_label,
+                    status=AnalysisRunStatus.COMPLETED,
+                    started_at=run.started_at,
+                    finished_at=run.completed_at,
+                    records_seen=run.records_seen,
+                    records_accepted=run.records_accepted,
+                    signals_created=run.signals_created,
+                    correlations_created=run.correlations_created,
+                    incidents_created=run.incidents_created,
+                    failure_phase=None,
+                )
+                _update_run(connection, record)
+        except InvalidAnalysisRunTransitionError:
+            raise
+        except InvalidStoredAnalysisRunError:
+            raise
+        except (sqlite3.Error, TypeError, ValueError) as error:
+            raise AnalysisRunRepositoryError("Unable to complete analysis run") from error
+
+    def fail_run(
+        self,
+        analysis_run_id: str,
+        *,
+        failed_at: datetime,
+        failure_phase: AnalysisFailurePhase,
+        signals_created: int | None = None,
+        correlations_created: int | None = None,
+        incidents_created: int | None = None,
+    ) -> None:
+        """Atomically transition a RUNNING row to FAILED with typed stage data."""
+
+        try:
+            with closing(self._connect()) as connection, connection:
+                connection.execute("BEGIN IMMEDIATE")
+                current = self._load_run(connection, analysis_run_id)
+                _require_running(current, analysis_run_id)
+                assert current is not None
+                record = AnalysisRunRecord(
+                    analysis_run_id=current.analysis_run_id,
+                    source_type=current.source_type,
+                    source_label=current.source_label,
+                    status=AnalysisRunStatus.FAILED,
+                    started_at=current.started_at,
+                    finished_at=failed_at,
+                    records_seen=current.records_seen,
+                    records_accepted=current.records_accepted,
+                    signals_created=signals_created,
+                    correlations_created=correlations_created,
+                    incidents_created=incidents_created,
+                    failure_phase=failure_phase,
+                )
+                _update_run(connection, record)
+        except InvalidAnalysisRunTransitionError:
+            raise
+        except InvalidStoredAnalysisRunError:
+            raise
+        except (sqlite3.Error, TypeError, ValueError) as error:
+            raise AnalysisRunRepositoryError("Unable to fail analysis run") from error
+
+    def get_run(self, analysis_run_id: str) -> AnalysisRunRecord | None:
+        """Return one durable lifecycle record by exact ID."""
+
+        try:
+            with closing(self._connect()) as connection:
+                return self._load_run(connection, analysis_run_id)
+        except InvalidStoredAnalysisRunError:
+            raise
+        except sqlite3.Error as error:
+            raise AnalysisRunRepositoryError("Unable to load analysis run") from error
+
+    def list_runs(self) -> tuple[AnalysisRunRecord, ...]:
+        """Return durable lifecycle records in insertion order."""
+
+        try:
+            with closing(self._connect()) as connection:
+                rows = connection.execute(
+                    "SELECT * FROM analysis_runs ORDER BY sequence"
+                ).fetchall()
+                return tuple(_run_from_row(row) for row in rows)
+        except InvalidStoredAnalysisRunError:
+            raise
+        except sqlite3.Error as error:
+            raise AnalysisRunRepositoryError("Unable to list analysis runs") from error
 
     def get_incident(self, incident_id: str) -> Incident | None:
         """Return an incident by exact ID, or ``None`` if it is absent."""
@@ -220,24 +413,25 @@ class SQLiteIncidentRepository:
                 if version == _SCHEMA_VERSION:
                     connection.commit()
                     return
-                if version != 0:
+                if version not in {0, 1}:
                     raise UnsupportedSchemaVersionError(
                         f"Unsupported SQLite incident schema version {version}; "
                         f"this application supports {_SCHEMA_VERSION}"
                     )
 
-                existing_tables = connection.execute(
-                    """
-                    SELECT name FROM sqlite_master
-                    WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-                    """
-                ).fetchall()
-                if existing_tables:
-                    raise UnsupportedSchemaVersionError(
-                        "Database has unversioned tables; refusing to modify it"
-                    )
+                if version == 0:
+                    existing_tables = connection.execute(
+                        """
+                        SELECT name FROM sqlite_master
+                        WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+                        """
+                    ).fetchall()
+                    if existing_tables:
+                        raise UnsupportedSchemaVersionError(
+                            "Database has unversioned tables; refusing to modify it"
+                        )
 
-                schema_statements = (
+                    schema_statements = (
                     """CREATE TABLE incidents (
                         sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                         incident_id TEXT NOT NULL UNIQUE,
@@ -282,9 +476,10 @@ class SQLiteIncidentRepository:
                         PRIMARY KEY (incident_id, position),
                         UNIQUE (incident_id, signal_id)
                     )""",
-                )
-                for statement in schema_statements:
-                    connection.execute(statement)
+                    )
+                    for statement in schema_statements:
+                        connection.execute(statement)
+                connection.execute(_ANALYSIS_RUNS_TABLE_SQL)
                 connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
                 connection.commit()
         except UnsupportedSchemaVersionError:
@@ -334,6 +529,95 @@ class SQLiteIncidentRepository:
             raise InvalidStoredIncidentError(
                 f"Persisted incident {incident_id!r} is invalid"
             ) from error
+
+    @staticmethod
+    def _load_run(
+        connection: sqlite3.Connection, analysis_run_id: str
+    ) -> AnalysisRunRecord | None:
+        row = connection.execute(
+            "SELECT * FROM analysis_runs WHERE analysis_run_id = ?",
+            (analysis_run_id,),
+        ).fetchone()
+        return None if row is None else _run_from_row(row)
+
+
+def _require_running(
+    record: AnalysisRunRecord | None, analysis_run_id: str
+) -> None:
+    if record is None:
+        raise InvalidAnalysisRunTransitionError(
+            f"Analysis run {analysis_run_id!r} does not exist"
+        )
+    if record.status is not AnalysisRunStatus.RUNNING:
+        raise InvalidAnalysisRunTransitionError(
+            f"Analysis run {analysis_run_id!r} is already terminal"
+        )
+
+
+def _record_to_storage(record: AnalysisRunRecord) -> tuple[object, ...]:
+    return (
+        record.analysis_run_id,
+        record.source_type.value,
+        record.source_label,
+        record.status.value,
+        _datetime_to_storage(record.started_at),
+        None if record.finished_at is None else _datetime_to_storage(record.finished_at),
+        record.records_seen,
+        record.records_accepted,
+        record.signals_created,
+        record.correlations_created,
+        record.incidents_created,
+        None if record.failure_phase is None else record.failure_phase.value,
+    )
+
+
+def _update_run(connection: sqlite3.Connection, record: AnalysisRunRecord) -> None:
+    values = _record_to_storage(record)
+    cursor = connection.execute(
+        """
+        UPDATE analysis_runs SET
+            source_type = ?, source_label = ?, status = ?, started_at = ?,
+            finished_at = ?, records_seen = ?, records_accepted = ?,
+            signals_created = ?, correlations_created = ?, incidents_created = ?,
+            failure_phase = ?
+        WHERE analysis_run_id = ? AND status = 'running'
+        """,
+        (*values[1:], values[0]),
+    )
+    if cursor.rowcount != 1:
+        raise InvalidAnalysisRunTransitionError(
+            f"Analysis run {record.analysis_run_id!r} is not RUNNING"
+        )
+
+
+def _run_from_row(row: sqlite3.Row) -> AnalysisRunRecord:
+    try:
+        return AnalysisRunRecord(
+            analysis_run_id=_required_str(row["analysis_run_id"]),
+            source_type=AnalysisSourceType(_required_str(row["source_type"])),
+            source_label=_optional_str(row["source_label"]),
+            status=AnalysisRunStatus(_required_str(row["status"])),
+            started_at=_datetime_from_storage(row["started_at"]),
+            finished_at=(
+                None
+                if row["finished_at"] is None
+                else _datetime_from_storage(row["finished_at"])
+            ),
+            records_seen=_required_int(row["records_seen"]),
+            records_accepted=_required_int(row["records_accepted"]),
+            signals_created=_optional_int(row["signals_created"]),
+            correlations_created=_optional_int(row["correlations_created"]),
+            incidents_created=_optional_int(row["incidents_created"]),
+            failure_phase=(
+                None
+                if row["failure_phase"] is None
+                else AnalysisFailurePhase(_required_str(row["failure_phase"]))
+            ),
+        )
+    except (IndexError, KeyError, TypeError, ValueError) as error:
+        raise InvalidStoredAnalysisRunError(
+            "Persisted analysis-run data is invalid"
+        ) from error
 
 
 def _signal_from_row(row: sqlite3.Row) -> Signal:
@@ -459,4 +743,16 @@ def _required_str(value: object) -> str:
 def _optional_str(value: object) -> str | None:
     if value is not None and not isinstance(value, str):
         raise ValueError("Persisted optional text field is invalid")
+    return value
+
+
+def _required_int(value: object) -> int:
+    if not isinstance(value, int):
+        raise TypeError("Persisted required integer field is invalid")
+    return value
+
+
+def _optional_int(value: object) -> int | None:
+    if value is not None and not isinstance(value, int):
+        raise TypeError("Persisted optional integer field is invalid")
     return value
