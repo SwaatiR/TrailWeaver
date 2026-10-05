@@ -21,6 +21,7 @@ class AnalysisRunStatus(StrEnum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    INTERRUPTED = "interrupted"
 
 
 class AnalysisFailurePhase(StrEnum):
@@ -174,6 +175,17 @@ class AnalysisRunRecord:
             }[self.failure_phase]
             if any(count is None for count in outputs[:required_count]):
                 raise ValueError("failed analysis run is missing a known stage count")
+        elif self.status is AnalysisRunStatus.INTERRUPTED:
+            # INTERRUPTED classifies an inherited unfinished lifecycle; it is
+            # not proof of a crash, and the classification time is not the
+            # interruption time. Output counts and failure phase are unknown
+            # and must never be reconstructed or inferred.
+            if self.finished_at is None:
+                raise ValueError("interrupted analysis runs require a classification time")
+            if any(count is not None for count in outputs):
+                raise ValueError("interrupted analysis runs cannot contain output counts")
+            if self.failure_phase is not None:
+                raise ValueError("interrupted analysis runs cannot contain a failure phase")
 
 
 def _require_aware(value: datetime, field_name: str) -> None:

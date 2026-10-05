@@ -189,7 +189,7 @@ def test_v1_database_migrates_atomically_and_preserves_incident_evidence(tmp_pat
     assert migrated.get_incident(incident.incident_id).timeline
     assert migrated.list_runs() == ()
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone() == (4,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (5,)
     assert SQLiteIncidentRepository(database).list_runs() == ()
 
 

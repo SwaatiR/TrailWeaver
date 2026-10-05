@@ -227,7 +227,7 @@ def test_sqlite_event_tables_hold_identity_only_with_exact_columns(
 
     connection = sqlite3.connect(database)
     try:
-        assert connection.execute("PRAGMA user_version").fetchone() == (4,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (5,)
         assert {
             row[1]
             for row in connection.execute("PRAGMA table_info(events)").fetchall()
@@ -347,7 +347,7 @@ def test_ledger_storage_failure_surfaces_as_ledger_error(
         )
 
 
-def test_v2_database_migrates_to_v4_preserving_all_existing_data(
+def test_v2_database_migrates_to_v5_preserving_all_existing_data(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "v2.sqlite3"
@@ -374,7 +374,7 @@ def test_v2_database_migrates_to_v4_preserving_all_existing_data(
     assert migrated.list_runs()[0].analysis_run_id == run_id
     assert migrated.known_identities([]) == frozenset()
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone() == (4,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (5,)
         assert connection.execute("SELECT COUNT(*) FROM events").fetchone() == (0,)
         assert connection.execute(
             "SELECT COUNT(*) FROM analysis_run_events"

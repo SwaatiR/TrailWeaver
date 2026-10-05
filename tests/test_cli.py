@@ -59,6 +59,7 @@ def test_local_attack_analysis_persists_incident_and_prints_safe_summary(
     assert exit_code == 0
     log_records = [json.loads(line) for line in errors.getvalue().splitlines()]
     assert [record["event"] for record in log_records] == [
+        "analysis_run_recovery_completed",
         "investigation_started",
         "investigation_analyzed",
         "investigation_completed",

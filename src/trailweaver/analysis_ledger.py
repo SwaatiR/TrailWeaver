@@ -40,6 +40,27 @@ class AnalysisRunRepository(Protocol):
         """Return lifecycle records in stable insertion order."""
 
 
+class AnalysisRunRecoveryRepository(Protocol):
+    """Classify inherited unfinished lifecycles after a cold start.
+
+    This is lifecycle classification only: every durable RUNNING record
+    becomes INTERRUPTED with the same classification timestamp. Nothing is
+    replayed, resumed, or reconstructed.
+    """
+
+    def mark_running_runs_interrupted(
+        self,
+        *,
+        interrupted_at: datetime,
+    ) -> int:
+        """Atomically classify every RUNNING record as INTERRUPTED.
+
+        Returns the number of transitioned records; a second invocation
+        with no RUNNING candidates returns 0. Terminal records are never
+        modified.
+        """
+
+
 class DuplicateAnalysisRunError(ValueError):
     """Raised when a ledger already contains the requested analysis-run ID."""
 
@@ -130,6 +151,45 @@ class InMemoryAnalysisRunRepository:
 
     def list_runs(self) -> tuple[AnalysisRunRecord, ...]:
         return self._records
+
+    def mark_running_runs_interrupted(self, *, interrupted_at: datetime) -> int:
+        """Classify every RUNNING record as INTERRUPTED with one timestamp.
+
+        Validation precedes any mutation: a naive timestamp, a timestamp
+        predating any candidate start, or a malformed candidate aborts the
+        whole operation without changing a single record.
+        """
+
+        if interrupted_at.tzinfo is None or interrupted_at.utcoffset() is None:
+            raise ValueError("interrupted_at must be timezone-aware")
+        candidates = [
+            record for record in self._records if record.status is AnalysisRunStatus.RUNNING
+        ]
+        replacements: list[AnalysisRunRecord] = []
+        for record in candidates:
+            if interrupted_at < record.started_at:
+                raise InvalidAnalysisRunTransitionError(
+                    "interrupted_at predates an inherited RUNNING analysis run"
+                )
+            replacements.append(
+                AnalysisRunRecord(
+                    analysis_run_id=record.analysis_run_id,
+                    source_type=record.source_type,
+                    source_label=record.source_label,
+                    status=AnalysisRunStatus.INTERRUPTED,
+                    started_at=record.started_at,
+                    finished_at=interrupted_at,
+                    records_seen=record.records_seen,
+                    records_accepted=record.records_accepted,
+                    signals_created=None,
+                    correlations_created=None,
+                    incidents_created=None,
+                    failure_phase=None,
+                )
+            )
+        for replacement in replacements:
+            self._replace(replacement)
+        return len(replacements)
 
     def _running_record(self, analysis_run_id: str) -> AnalysisRunRecord:
         current = self._records_by_id.get(analysis_run_id)

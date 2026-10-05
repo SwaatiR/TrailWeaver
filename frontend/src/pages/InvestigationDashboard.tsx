@@ -217,6 +217,10 @@ function runStatusLabel(status: string): string {
 
 function ProvenanceRunDetails({ run }: { run: ObservingRun }) {
   const statusClass = `provenance-status provenance-status--${run.status.toLowerCase()}`;
+  // An interrupted run's timestamp marks durable classification, not the
+  // moment execution ended — label it truthfully.
+  const terminalTimeLabel =
+    run.status.toLowerCase() === "interrupted" ? "Classified interrupted" : "Finished";
   return (
     <div className="provenance-run">
       <code className="provenance-run__id">{run.analysis_run_id}</code>
@@ -238,7 +242,7 @@ function ProvenanceRunDetails({ run }: { run: ObservingRun }) {
           <dd><time dateTime={run.started_at}>{formatDateTime(run.started_at)}</time></dd>
         </div>
         <div>
-          <dt>Finished</dt>
+          <dt>{terminalTimeLabel}</dt>
           <dd>
             {run.finished_at ? (
               <time dateTime={run.finished_at}>{formatDateTime(run.finished_at)}</time>

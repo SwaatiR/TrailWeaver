@@ -79,6 +79,7 @@ from trailweaver.provenance import (
     IncidentProvenanceRepository,
     InMemoryProvenanceReader,
 )
+from trailweaver.recovery import recover_interrupted_runs
 from trailweaver.runtime import validate_cors_origins
 from trailweaver.signal_history import (
     InMemorySignalHistory,
@@ -554,6 +555,11 @@ def create_persistent_app(
     """
 
     repository = SQLiteIncidentRepository(database_path)
+    # Cold-start recovery before serving: inherited RUNNING rows from the
+    # previous ownership epoch are classified INTERRUPTED. A failure here
+    # raises through existing storage-error handling and the application is
+    # never constructed, so no analysis is accepted on unrecovered state.
+    recover_interrupted_runs(repository)
     return create_app(
         repository=repository,
         analysis_run_repository=repository,

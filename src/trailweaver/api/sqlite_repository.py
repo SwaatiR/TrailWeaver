@@ -48,7 +48,7 @@ from trailweaver.provenance import (
 from trailweaver.signal_history import InvalidStoredSignalError, SignalHistoryError
 from trailweaver.signals import Signal, SignalSeverity
 
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 
 _SIGNAL_HISTORY_TABLE_SQL = """CREATE TABLE signal_history (
     signal_id TEXT PRIMARY KEY CHECK (length(trim(signal_id)) > 0),
@@ -130,7 +130,7 @@ _ANALYSIS_RUNS_TABLE_SQL = """CREATE TABLE analysis_runs (
             length(trim(source_label)) > 0 AND length(source_label) <= 256
         )
     ),
-    status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+    status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed', 'interrupted')),
     started_at TEXT NOT NULL CHECK (length(started_at) > 0),
     finished_at TEXT,
     records_seen INTEGER NOT NULL CHECK (records_seen >= 0),
@@ -167,8 +167,22 @@ _ANALYSIS_RUNS_TABLE_SQL = """CREATE TABLE analysis_runs (
                     AND signals_created IS NOT NULL AND correlations_created IS NOT NULL
                     AND incidents_created IS NOT NULL)
             ))
+        OR
+        (status = 'interrupted' AND finished_at IS NOT NULL
+            AND signals_created IS NULL AND correlations_created IS NULL
+            AND incidents_created IS NULL AND failure_phase IS NULL)
     )
 )"""
+
+_ANALYSIS_RUNS_NEW_TABLE_SQL = _ANALYSIS_RUNS_TABLE_SQL.replace(
+    "CREATE TABLE analysis_runs (", "CREATE TABLE analysis_runs_new (", 1
+)
+
+_ANALYSIS_RUNS_COPY_COLUMNS = (
+    "sequence, analysis_run_id, source_type, source_label, status, "
+    "started_at, finished_at, records_seen, records_accepted, "
+    "signals_created, correlations_created, incidents_created, failure_phase"
+)
 
 
 class IncidentRepositoryError(RuntimeError):
@@ -348,6 +362,56 @@ class SQLiteIncidentRepository:
             raise
         except sqlite3.Error as error:
             raise AnalysisRunRepositoryError("Unable to list analysis runs") from error
+
+    def mark_running_runs_interrupted(self, *, interrupted_at: datetime) -> int:
+        """Atomically classify every inherited RUNNING row as INTERRUPTED.
+
+        All transitioned rows receive the same classification timestamp.
+        Validation precedes any write: a timestamp predating any candidate
+        start, a malformed candidate, or a row-count mismatch aborts the
+        whole operation without changing a single row. Terminal rows are
+        never modified, so a second invocation returns 0.
+        """
+
+        if interrupted_at.tzinfo is None or interrupted_at.utcoffset() is None:
+            raise ValueError("interrupted_at must be timezone-aware")
+        try:
+            with closing(self._connect()) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    rows = connection.execute(
+                        "SELECT * FROM analysis_runs "
+                        "WHERE status = 'running' ORDER BY sequence"
+                    ).fetchall()
+                    candidates = [_run_from_row(row) for row in rows]
+                    for candidate in candidates:
+                        if interrupted_at < candidate.started_at:
+                            raise InvalidAnalysisRunTransitionError(
+                                "interrupted_at predates an inherited RUNNING analysis run"
+                            )
+                    stamp = _datetime_to_storage(interrupted_at)
+                    cursor = connection.execute(
+                        "UPDATE analysis_runs SET status = 'interrupted', "
+                        "finished_at = ?, signals_created = NULL, "
+                        "correlations_created = NULL, incidents_created = NULL, "
+                        "failure_phase = NULL WHERE status = 'running'",
+                        (stamp,),
+                    )
+                    if cursor.rowcount != len(candidates):
+                        raise AnalysisRunRepositoryError(
+                            "Unable to classify inherited analysis runs"
+                        )
+                    connection.commit()
+                    return len(candidates)
+                except Exception:
+                    connection.rollback()
+                    raise
+        except (AnalysisRunRepositoryError, InvalidAnalysisRunTransitionError):
+            raise
+        except sqlite3.Error as error:
+            raise AnalysisRunRepositoryError(
+                "Unable to classify inherited analysis runs"
+            ) from error
 
     def known_identities(
         self, identities: Collection[EventIdentity]
@@ -710,88 +774,110 @@ class SQLiteIncidentRepository:
     def _initialize_schema(self) -> None:
         try:
             with closing(self._connect()) as connection:
-                connection.execute("BEGIN IMMEDIATE")
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
                 if version == _SCHEMA_VERSION:
-                    connection.commit()
                     return
-                if version not in {0, 1, 2, 3}:
+                if version not in {0, 1, 2, 3, 4}:
                     raise UnsupportedSchemaVersionError(
                         f"Unsupported SQLite incident schema version {version}; "
                         f"this application supports {_SCHEMA_VERSION}"
                     )
+                if version in {2, 3, 4}:
+                    # The v5 analysis_runs CHECK cannot be altered in place.
+                    # Disable FK enforcement before opening the migration
+                    # transaction so the parent rebuild uses legacy rename
+                    # behavior (dependent analysis_run_events keeps resolving
+                    # the parent by name). The pragma is per-connection and
+                    # dies with this migration-only connection.
+                    connection.execute("PRAGMA foreign_keys = OFF")
+                try:
+                    connection.execute("BEGIN IMMEDIATE")
+                    if version == 0:
+                        existing_tables = connection.execute(
+                            """
+                            SELECT name FROM sqlite_master
+                            WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+                            """
+                        ).fetchall()
+                        if existing_tables:
+                            raise UnsupportedSchemaVersionError(
+                                "Database has unversioned tables; refusing to modify it"
+                            )
 
-                if version == 0:
-                    existing_tables = connection.execute(
-                        """
-                        SELECT name FROM sqlite_master
-                        WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-                        """
-                    ).fetchall()
-                    if existing_tables:
-                        raise UnsupportedSchemaVersionError(
-                            "Database has unversioned tables; refusing to modify it"
+                        schema_statements = (
+                        """CREATE TABLE incidents (
+                            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                            incident_id TEXT NOT NULL UNIQUE,
+                            title TEXT NOT NULL,
+                            description TEXT NOT NULL,
+                            severity TEXT NOT NULL,
+                            summary TEXT NOT NULL,
+                            created_at TEXT NOT NULL
+                        )""",
+                        """CREATE TABLE correlation_matches (
+                            incident_id TEXT PRIMARY KEY
+                                REFERENCES incidents(incident_id) ON DELETE CASCADE,
+                            correlation_id TEXT NOT NULL,
+                            rule_id TEXT NOT NULL,
+                            title TEXT NOT NULL,
+                            description TEXT NOT NULL,
+                            reason TEXT NOT NULL
+                        )""",
+                        """CREATE TABLE signals (
+                            incident_id TEXT NOT NULL
+                                REFERENCES correlation_matches(incident_id) ON DELETE CASCADE,
+                            position INTEGER NOT NULL CHECK (position >= 0),
+                            signal_id TEXT NOT NULL,
+                            rule_id TEXT NOT NULL,
+                            title TEXT NOT NULL,
+                            description TEXT NOT NULL,
+                            severity TEXT NOT NULL,
+                            reason TEXT NOT NULL,
+                            event_timestamp TEXT NOT NULL,
+                            provider TEXT NOT NULL,
+                            service TEXT NOT NULL,
+                            action TEXT NOT NULL,
+                            event_id TEXT,
+                            outcome TEXT NOT NULL,
+                            error_code TEXT,
+                            error_message TEXT,
+                            region TEXT,
+                            source_ip TEXT,
+                            actor_json TEXT,
+                            resources_json TEXT NOT NULL,
+                            attributes_json TEXT NOT NULL,
+                            PRIMARY KEY (incident_id, position),
+                            UNIQUE (incident_id, signal_id)
+                        )""",
                         )
-
-                    schema_statements = (
-                    """CREATE TABLE incidents (
-                        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                        incident_id TEXT NOT NULL UNIQUE,
-                        title TEXT NOT NULL,
-                        description TEXT NOT NULL,
-                        severity TEXT NOT NULL,
-                        summary TEXT NOT NULL,
-                        created_at TEXT NOT NULL
-                    )""",
-                    """CREATE TABLE correlation_matches (
-                        incident_id TEXT PRIMARY KEY
-                            REFERENCES incidents(incident_id) ON DELETE CASCADE,
-                        correlation_id TEXT NOT NULL,
-                        rule_id TEXT NOT NULL,
-                        title TEXT NOT NULL,
-                        description TEXT NOT NULL,
-                        reason TEXT NOT NULL
-                    )""",
-                    """CREATE TABLE signals (
-                        incident_id TEXT NOT NULL
-                            REFERENCES correlation_matches(incident_id) ON DELETE CASCADE,
-                        position INTEGER NOT NULL CHECK (position >= 0),
-                        signal_id TEXT NOT NULL,
-                        rule_id TEXT NOT NULL,
-                        title TEXT NOT NULL,
-                        description TEXT NOT NULL,
-                        severity TEXT NOT NULL,
-                        reason TEXT NOT NULL,
-                        event_timestamp TEXT NOT NULL,
-                        provider TEXT NOT NULL,
-                        service TEXT NOT NULL,
-                        action TEXT NOT NULL,
-                        event_id TEXT,
-                        outcome TEXT NOT NULL,
-                        error_code TEXT,
-                        error_message TEXT,
-                        region TEXT,
-                        source_ip TEXT,
-                        actor_json TEXT,
-                        resources_json TEXT NOT NULL,
-                        attributes_json TEXT NOT NULL,
-                        PRIMARY KEY (incident_id, position),
-                        UNIQUE (incident_id, signal_id)
-                    )""",
-                    )
-                    for statement in schema_statements:
-                        connection.execute(statement)
-                if version in {0, 1}:
-                    connection.execute(_ANALYSIS_RUNS_TABLE_SQL)
-                if version in {0, 1, 2}:
-                    connection.execute(_EVENTS_TABLE_SQL)
-                    connection.execute(_RUN_EVENTS_TABLE_SQL)
-                connection.execute(_SIGNAL_HISTORY_TABLE_SQL)
-                connection.execute(_EMITTED_CORRELATIONS_TABLE_SQL)
-                connection.execute(_SIGNAL_HISTORY_INDEX_SQL)
-                connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
-                connection.commit()
+                        for statement in schema_statements:
+                            connection.execute(statement)
+                    if version in {0, 1}:
+                        connection.execute(_ANALYSIS_RUNS_TABLE_SQL)
+                    if version in {0, 1, 2}:
+                        connection.execute(_EVENTS_TABLE_SQL)
+                        connection.execute(_RUN_EVENTS_TABLE_SQL)
+                    if version in {2, 3, 4}:
+                        _migrate_analysis_runs_to_v5(connection)
+                    if version in {0, 1, 2, 3}:
+                        connection.execute(_SIGNAL_HISTORY_TABLE_SQL)
+                        connection.execute(_EMITTED_CORRELATIONS_TABLE_SQL)
+                        connection.execute(_SIGNAL_HISTORY_INDEX_SQL)
+                    violations = connection.execute(
+                        "PRAGMA foreign_key_check"
+                    ).fetchall()
+                    if violations:
+                        raise IncidentRepositoryError(
+                            "Incident database foreign-key integrity check failed"
+                        )
+                    connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
         except UnsupportedSchemaVersionError:
+            raise
+        except IncidentRepositoryError:
             raise
         except sqlite3.Error as error:
             raise IncidentRepositoryError("Unable to initialize incident database") from error
@@ -958,6 +1044,31 @@ class SQLiteIncidentRepository:
             raise InvalidStoredIncidentError(
                 f"Persisted provenance for incident {incident_id!r} is invalid"
             ) from error
+
+
+def _migrate_analysis_runs_to_v5(connection: sqlite3.Connection) -> None:
+    """Rebuild analysis_runs with the v5 CHECK constraints, preserving data.
+
+    SQLite cannot alter CHECK constraints in place. The caller disables FK
+    enforcement before the migration transaction, so the dependent
+    analysis_run_events table (which references the parent by name) needs
+    no rebuild of its own. Every row and explicit ``sequence`` value is
+    copied; the AUTOINCREMENT counter follows the preserved maximum.
+    """
+
+    connection.execute(_ANALYSIS_RUNS_NEW_TABLE_SQL)
+    before = connection.execute("SELECT COUNT(*) FROM analysis_runs").fetchone()[0]
+    connection.execute(
+        f"INSERT INTO analysis_runs_new ({_ANALYSIS_RUNS_COPY_COLUMNS}) "
+        f"SELECT {_ANALYSIS_RUNS_COPY_COLUMNS} FROM analysis_runs ORDER BY sequence"
+    )
+    after = connection.execute("SELECT COUNT(*) FROM analysis_runs_new").fetchone()[0]
+    if before != after:
+        raise IncidentRepositoryError(
+            "Incident database migration did not preserve analysis runs"
+        )
+    connection.execute("DROP TABLE analysis_runs")
+    connection.execute("ALTER TABLE analysis_runs_new RENAME TO analysis_runs")
 
 
 def _require_running(

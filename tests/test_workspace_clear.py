@@ -98,7 +98,7 @@ def test_sqlite_clear_removes_incidents_and_related_rows_without_touching_schema
         }
     finally:
         connection.close()
-    assert version == 4
+    assert version == 5
     assert {"incidents", "correlation_matches", "signals"} <= tables
 
     repository.save_incident(create_demo_incident())

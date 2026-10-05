@@ -4407,6 +4407,13 @@ p {
   border-color: var(--red);
 }
 
+.provenance-status--interrupted {
+  color: var(--ink);
+  background: var(--surface-soft);
+  border-color: var(--ink-soft);
+  border-style: dashed;
+}
+
 @media (max-width: 620px) {
   .provenance-summary {
     grid-template-columns: 1fr;

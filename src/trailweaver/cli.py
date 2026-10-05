@@ -34,6 +34,7 @@ from trailweaver.cloudtrail_ingestion import (
 )
 from trailweaver.event_ledger import EventLedgerError
 from trailweaver.observability import configure_logging, log_event
+from trailweaver.recovery import recover_interrupted_runs
 from trailweaver.runtime import (
     RuntimeConfig,
     RuntimeConfigurationError,
@@ -77,6 +78,7 @@ def main(
     try:
         if arguments.command == "analyze-file":
             repository = SQLiteIncidentRepository(database_path)
+            recover_interrupted_runs(repository)
             result = create_default_investigation_runner(
                 repository,
                 analysis_run_repository=repository,
@@ -92,6 +94,7 @@ def main(
 
         if arguments.command == "analyze-s3":
             repository = SQLiteIncidentRepository(database_path)
+            recover_interrupted_runs(repository)
             runner = create_default_investigation_runner(
                 repository,
                 analysis_run_repository=repository,
@@ -117,6 +120,7 @@ def main(
 
         if arguments.command == "analyze-s3-prefix":
             repository = SQLiteIncidentRepository(database_path)
+            recover_interrupted_runs(repository)
             runner = create_default_investigation_runner(
                 repository,
                 analysis_run_repository=repository,

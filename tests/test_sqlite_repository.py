@@ -69,7 +69,7 @@ def test_new_database_initializes_versioned_schema_and_lists_empty(tmp_path) -> 
 
     assert repository.list_incidents() == ()
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone() == (4,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (5,)
         tables = {
             row[0]
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -199,7 +199,7 @@ def test_hostile_looking_id_is_a_parameterized_lookup(tmp_path) -> None:
     assert repository.get_incident("' OR 1=1 --") is None
     assert len(repository.list_incidents()) == 1
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone() == (4,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (5,)
 
 
 def test_unsupported_schema_version_fails_without_modifying_database(tmp_path) -> None:

@@ -237,6 +237,25 @@ describe("EvidenceProvenancePanel", () => {
     ).toBeInTheDocument();
   });
 
+  it("renders interrupted runs as terminal with classification-time copy", () => {
+    const data = provenance({
+      observing_runs: [
+        run({
+          analysis_run_id: "run-old",
+          status: "interrupted",
+          finished_at: "2026-10-05T09:00:00.000000+00:00",
+        }),
+      ],
+      evidence: [
+        evidence({ signal_id: "signal-1", observed_run_ids: ["run-old"] }),
+      ],
+    });
+    render(<EvidenceProvenancePanel provenance={{ status: "success", data }} onRetry={() => {}} />);
+    expect(screen.getByText("Interrupted")).toBeInTheDocument();
+    expect(screen.getByText("Classified interrupted")).toBeInTheDocument();
+    expect(screen.queryByText("Still running")).not.toBeInTheDocument();
+  });
+
   it("exposes run status as text, never color alone", () => {
     const data = provenance({
       observing_runs: [

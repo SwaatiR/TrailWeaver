@@ -91,7 +91,9 @@ Below the timeline, the investigation shows recorded evidence provenance: which 
 analysis runs observed the identified events behind each signal, with the first time
 TrailWeaver recorded each event. This answers where the evidence was recorded — it
 never claims which run created or owns an incident, and partial history is reported
-truthfully when some evidence has no recorded observation history.
+truthfully when some evidence has no recorded observation history. A run shown as
+Interrupted was classified as interrupted at startup (see restart recovery below);
+its classification time is not the moment execution ended.
 
 ### Risk and MITRE ATT&CK
 
@@ -381,9 +383,10 @@ reconstruct the existing investigation API. Signal IDs, event IDs, enums, and
 timezone-aware timestamps are preserved. `raw_event` payloads are intentionally not
 copied into this repository; source-record ownership is deferred. SQLite uses the
 standard library and an explicit schema version (`PRAGMA user_version`). New databases
-initialize at schema v2, and existing v1 incident databases upgrade automatically in one
-transaction without changing their incident, correlation, or signal evidence. The new
-analysis ledger starts empty after that migration; historical runs are not inferred.
+initialize at schema v5, and older supported incident databases upgrade automatically
+in one transaction without changing their incident, correlation, or signal evidence.
+The analysis ledger rows and event-observation associations are preserved exactly;
+a RUNNING row migrates as RUNNING and is only later classified by startup recovery.
 Unknown or unversioned schemas fail without destructive replacement.
 
 Risk, MITRE ATT&CK, the observed attack graph, and investigation guidance remain
@@ -408,6 +411,23 @@ The caller controls the database file path; the repository creates its parent
 directory and schema when explicitly constructed. The demo application remains
 isolated and in-memory. Persistence adds no CloudTrail ingestion, upload endpoints,
 or public incident-write API.
+
+### Restart recovery
+
+One TrailWeaver process must exclusively own a persistent SQLite database at a time;
+simultaneous CLI/API processes sharing one database file are unsupported. At cold
+startup, before any analysis is accepted, the new owner atomically classifies every
+inherited `RUNNING` analysis row as INTERRUPTED with one shared classification
+timestamp. INTERRUPTED does not prove a crash — it means the run was inherited
+unfinished, and the classification time is not the interruption time. Recovery is
+lifecycle classification only: it replays no sources, resumes no analyses, and
+reconstructs no output counts, failure phases, event acknowledgement, or signal
+history. A later explicit resubmission creates a new run; committed correlation
+tombstones still suppress already-emitted incidents, while unacknowledged or
+identity-less (None-ID) evidence is processed again and may produce another incident.
+An interrupted S3 prefix is never resumed — explicit replay runs ordinary per-object
+analyses. If recovery itself fails, startup fails rather than serving unrecovered
+state.
 
 ### Real CloudTrail file ingestion
 
