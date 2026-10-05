@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trailweaver"
-version = "0.1.0"
+version = "0.2.0"
 description = "AWS cloud security detection and incident reconstruction platform"
 readme = "README.md"
 requires-python = ">=3.11"
