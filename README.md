@@ -235,58 +235,151 @@ normalized security context.
 
 ## Run it yourself
 
-TrailWeaver requires Python 3.11 or newer. Create and activate a virtual environment,
-then install the package with its development tools:
+Run the TrailWeaver API and dashboard locally with two terminal windows: one
+for the Python backend, one for the frontend. Both processes stay running
+while you use the dashboard.
+
+```text
+Terminal 1 — backend .... TrailWeaver API (http://localhost:8000)
+Terminal 2 — frontend ... Vite dev server (http://localhost:5173)
+Browser ................ TrailWeaver dashboard (http://localhost:5173)
+```
+
+### Prerequisites
+
+- Git
+- Python 3.11 or newer
+- Node.js with npm (Node.js 22 is the version used in CI)
+- Docker is optional (see below)
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/SwaatiR/TrailWeaver.git
+cd TrailWeaver
+```
+
+### 2. Start the backend — Terminal 1
+
+Create a Python virtual environment. A virtual environment is required: on
+distributions that enforce PEP 668 (such as Arch/CachyOS), installing into
+the system Python is rejected. Never use `sudo pip` or `--break-system-packages`.
+
+```bash
+python -m venv .venv
+```
+
+Activate it with the snippet for your shell:
+
+```bash
+source .venv/bin/activate
+```
+
+```fish
+source .venv/bin/activate.fish
+```
+
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+(On Windows, use `py` instead of `python` if `python` is not on your `PATH`.)
+
+Install the package with its development tools. Using `python -m pip` targets
+the active environment instead of assuming what bare `pip` resolves to:
 
 ```bash
 python -m pip install -e ".[dev]"
 ```
 
-Run the project checks with:
+Start the API:
+
+```bash
+python -m uvicorn trailweaver.api.app:app --reload
+```
+
+The backend serves `http://localhost:8000` (`/health` for a quick check,
+`/docs` for the interactive API reference). Leave this terminal running.
+
+### 3. Start the frontend — Terminal 2
+
+Keep the backend running and open a second terminal. This terminal does not
+need the Python virtual environment.
+
+```bash
+cd frontend
+npm ci
+npm run dev
+```
+
+Run `npm ci` for the first setup (or after dependencies change) because the
+tracked `package-lock.json` is the reproducible path; later runs are just
+`npm run dev`. The dashboard serves `http://localhost:5173` and reaches the
+backend at `http://localhost:8000` by default.
+
+### 4. Open TrailWeaver
+
+Open `http://localhost:5173` and upload
+`samples/cloudtrail/account-compromise-sequence.json` for a deterministic
+demo incident (3 records, 3 accepted, 3 signals, 1 correlation, 1 incident).
+
+For a preloaded presentation workspace, run the demo API in Terminal 1
+instead of the normal entry point:
+
+```bash
+python -m uvicorn trailweaver.api.demo:app --reload
+```
+
+Demo mode runs the real file-analysis pipeline against an in-memory
+repository with five known demo assets. S3 analysis stays disabled, and a
+demo-only reset returns the workspace to zero incidents. Demo mode adds no
+persistence or AWS access and is never enabled by the normal entry point.
+
+No AWS account or credentials are needed to launch TrailWeaver or to explore
+local and demo workflows. Only S3-backed analysis reads from AWS, using
+boto3's normal credential provider chain (instance profile, environment
+credentials, or container role) — never access-key flags. Do not test with
+sensitive production AWS evidence.
+
+### Prefer Docker?
+
+The Compose stack runs the same API/dashboard split in containers; see
+[Containerized runtime](#containerized-runtime). In short:
+
+```bash
+docker compose up --build
+```
+
+then open `http://localhost:8080`.
+
+### Optional: verify your setup
+
+Tests are not required to run the application. From the repository root with
+the virtual environment activated:
 
 ```bash
 pytest
 ruff check .
 ```
 
-### Demo dashboard (fastest path)
-
-Run the local development API from the repository root with:
+From `frontend/`:
 
 ```bash
-uvicorn trailweaver.api.app:app --reload
+npm test
 ```
 
-This normal entry point intentionally starts with an empty incident repository. For
-local dashboard development and presentations, start the explicit demo entry point
-instead:
+### Troubleshooting
 
-```bash
-uvicorn trailweaver.api.demo:app --reload
-```
+- `externally-managed-environment` → create and activate `.venv` as above;
+  do not install into the system Python.
+- `uvicorn: command not found` → the virtual environment is not activated,
+  or the development install did not complete.
+- Frontend dependency or module errors → from `frontend/`, run `npm ci`.
 
-Demo mode starts from an empty workspace through the same opt-in entry point
-and runs the real production file-analysis pipeline against an in-memory
-repository. Uploading `samples/cloudtrail/account-compromise-sequence.json`
-produces the deterministic incident (3 records, 3 accepted, 3 signals,
-1 correlation, 1 incident) through the real detection, correlation, incident,
-risk, MITRE ATT&CK, blast-radius, and investigation guidance components.
-It includes five known demo assets across storage, compute,
-database, and secret categories. Reachability is potential reachability over that loaded
-demo context; it does not claim any asset was accessed. S3 analysis stays
-disabled and a demo-only reset returns the workspace to zero incidents, so the
-fixture can be analyzed again. Demo mode is local
-development/presentation support only: it adds no persistence or AWS access and is never
-enabled by the normal application entry point.
+### API and dashboard reference
 
-In a second terminal, start the dashboard with the existing frontend dependencies:
-
-```bash
-cd frontend
-npm run dev
-```
-
-The frontend uses `http://localhost:8000` by default. To point it at another API, copy
+The normal entry point intentionally starts with an empty incident repository.
+To point the dashboard at another API, copy
 `frontend/.env.example` to `frontend/.env` and set:
 
 ```dotenv
