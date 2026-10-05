@@ -1345,7 +1345,7 @@ def test_ledger_read_failure_leaves_running_for_later_recovery() -> None:
         runner.run_cloudtrail_file(ATTACK_FIXTURE)
 
     assert runs.list_runs()[0].status is AnalysisRunStatus.RUNNING
-    assert recover_interrupted_runs(runs, interrupted_at=STAMP) == 1
+    assert recover_interrupted_runs(runs) == 1
 
 
 def test_history_failure_keeps_tombstone_and_replay_repairs_without_duplicate() -> None:
@@ -1361,7 +1361,7 @@ def test_history_failure_keeps_tombstone_and_replay_repairs_without_duplicate() 
     assert len(incidents.list_incidents()) == 1
     old_run_id = runs.list_runs()[0].analysis_run_id
     assert runs.get_run(old_run_id).status is AnalysisRunStatus.RUNNING  # type: ignore[union-attr]
-    assert recover_interrupted_runs(runs, interrupted_at=STAMP) == 1
+    assert recover_interrupted_runs(runs) == 1
 
     replayed = runner.run_cloudtrail_file(ATTACK_FIXTURE)
 
@@ -1389,7 +1389,7 @@ def test_completion_failure_keeps_history_and_replay_does_not_duplicate() -> Non
     old_run_id = runs.list_runs()[0].analysis_run_id
     assert runs.get_run(old_run_id).status is AnalysisRunStatus.RUNNING  # type: ignore[union-attr]
     assert len(history._signals) == 3
-    assert recover_interrupted_runs(runs, interrupted_at=STAMP) == 1
+    assert recover_interrupted_runs(runs) == 1
 
     replayed = runner.run_cloudtrail_file(ATTACK_FIXTURE)
 

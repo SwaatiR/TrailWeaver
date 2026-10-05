@@ -1,7 +1,8 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { EvidenceProvenancePanel } from "./InvestigationDashboard";
+import { AnalysisCompletePanel, EvidenceProvenancePanel } from "./InvestigationDashboard";
 import type {
+  AnalysisResponse,
   EvidenceProvenance,
   IncidentProvenance,
   ObservingRun,
@@ -289,5 +290,57 @@ describe("EvidenceProvenancePanel", () => {
     expect(screen.queryAllByText("export.json")).toHaveLength(0);
     expect(screen.getAllByText("other.json")).toHaveLength(2);
     expect(screen.getByText("run-9")).toBeInTheDocument();
+  });
+});
+
+describe("AnalysisCompletePanel reanalysis note", () => {
+  const result: AnalysisResponse = {
+    analysis_run_id: "run-1",
+    source_type: "web_upload",
+    started_at: "2026-10-04T10:00:00.000000+00:00",
+    completed_at: "2026-10-04T10:00:05.000000+00:00",
+    source_label: "export.json",
+    total_records: 3,
+    accepted_records: 3,
+    failed_records: 0,
+    duplicate_records: 0,
+    events_analyzed: 3,
+    signals: 3,
+    correlations: 1,
+    incidents_created: 1,
+    persisted_incidents: 1,
+    incident_ids: ["incident-1"],
+    issues: [],
+  };
+
+  function renderPanel() {
+    render(
+      <AnalysisCompletePanel
+        result={result}
+        sourceKind="file"
+        queueCount={1}
+        analyzeAnotherLabel="Scan another file"
+        onOpenInvestigation={() => {}}
+        onAnalyzeAnother={() => {}}
+      />,
+    );
+  }
+
+  it("describes reanalysis as a new run with deduplicated identities", () => {
+    renderPanel();
+    expect(
+      screen.getByText(/Reanalysis creates a new analysis run\./),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/does not create\s+duplicate incidents/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/evidence without an event ID may be\s+processed again/),
+    ).toBeInTheDocument();
+  });
+
+  it("no longer claims every reanalysis creates a separate incident", () => {
+    renderPanel();
+    expect(screen.queryByText(/creates a separate incident/)).not.toBeInTheDocument();
   });
 });

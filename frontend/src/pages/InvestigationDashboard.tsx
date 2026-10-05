@@ -731,7 +731,7 @@ function WelcomeCard() {
 
 const MAX_SHOWN_DIAGNOSTICS = 20;
 
-function AnalysisCompletePanel({
+export function AnalysisCompletePanel({
   result,
   sourceKind,
   queueCount,
@@ -1000,8 +1000,10 @@ function AnalysisCompletePanel({
       ) : null}
 
       <p className="analysis-complete__note">
-        Reprocessing the same source is not idempotent: analyzing it again
-        creates a separate incident.
+        Reanalysis creates a new analysis run. Previously recorded event
+        identities are deduplicated, so identified replay does not create
+        duplicate incidents — while evidence without an event ID may be
+        processed again.
       </p>
     </section>
   );

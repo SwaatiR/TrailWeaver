@@ -350,11 +350,16 @@ trailweaver --database ~/.local/share/trailweaver/incidents.sqlite3 \
   serve --host 127.0.0.1 --port 8000
 ```
 
-Analysis output contains only stage counts: source records, accepted records, failures,
-duplicates, analyzed events, signals, correlations, created incidents, and persisted
-incidents. Raw CloudTrail payloads are never printed. A successful benign analysis may
-report zero signals and incidents. Repeating analysis of already-processed evidence
-produces no new incidents; only genuinely new evidence creates new output.
+Analysis output reports safe operational metadata: the analysis run ID, source records,
+accepted records, failures, duplicates, analyzed events, signals, correlations,
+created incidents, and persisted incidents. Web analysis responses additionally carry
+bounded per-record diagnostics, and prefix analysis additionally reports per-object
+keys with error categories. Raw CloudTrail payloads
+are never printed. A successful benign analysis may
+report zero signals and incidents. Repeating analysis of already-processed,
+persistently identified evidence produces no new incidents; only genuinely new
+evidence creates new output. Evidence without a trustworthy event ID is not covered
+by that guarantee: it is always reprocessed and may create another incident.
 
 Runtime environment variables use the `TRAILWEAVER_` prefix:
 
@@ -520,14 +525,20 @@ contain no raw evidence.
 
 Each attempt that reaches `run_ingestion_result()` is also written to a separate
 analysis-run ledger. Its immutable snapshots move from `RUNNING` to either `COMPLETED`
-or `FAILED`, with a typed failure phase and only the counts known at that point. Source
+or `FAILED`, with a typed failure phase and only the counts known at that point, or
+are classified `INTERRUPTED` by startup lifecycle recovery when a new exclusive owner
+inherits them unfinished. Source
 labels are bounded, sanitized display provenance and may still contain operational
 naming information. They are not deduplication keys. The successful `AnalysisRun`
 remains a completed-only domain fact; it is not mutable lifecycle state.
 
 SQLite retains ledger history across restarts. A process crash can intentionally leave a
-`RUNNING` record, which is preserved as-is on reopen; automatic recovery and stale-run
-reconciliation are deferred. Clearing a workspace or resetting the demo removes
+`RUNNING` record. When an exclusively owned persistent database is opened, TrailWeaver
+performs startup lifecycle classification: every inherited `RUNNING` row becomes
+`INTERRUPTED` with one shared classification timestamp before any new analysis is
+accepted. This is lifecycle classification only — not automatic source replay, job
+resumption, checkpoint recovery, failure-phase reconstruction, or multi-process
+stale-run arbitration. Clearing a workspace or resetting the demo removes
 incidents but does not delete analysis-run history.
 
 A separate event ledger provides persistent sequential idempotency over the provider
@@ -618,8 +629,10 @@ as safe per-object outcomes while later objects continue; listing or internal
 persistence failures abort. Duplicate events across objects are recognized through
 the existing event ledger, cross-object signals correlate through the existing
 signal history, and replaying a prefix creates new runs without duplicate identified
-incidents. Zero matching objects is a successful empty result. No batch state is
-persisted and the SQLite schema is unchanged.
+incidents. Zero matching objects is a successful empty result. No durable
+aggregate or prefix batch record is persisted — each selected object still executes
+as an ordinary AnalysisRun, so its normal event observations, signal history,
+incidents, tombstones, and provenance may persist — and the SQLite schema is unchanged.
 
 ### Web analysis from the dashboard
 
@@ -750,7 +763,9 @@ variables. Log levels and ports are validated, CORS accepts only explicit HTTP(S
 origins without credentials, paths, queries, or wildcard origins, and AWS authentication
 uses the normal provider chain locally or the ECS task role in AWS. Raw CloudTrail
 events remain in-memory parser evidence only; logs, SQLite, and API responses do not
-contain `raw_event`.
+contain the opaque `raw_event` source blob. Normalized fields and durable identities
+needed for detection, correlation, event idempotency, signal history, and provenance
+are intentionally retained.
 
 Back up `/data/incidents.sqlite3` consistently before infrastructure changes and test
 restoration. EFS durability is not a substitute for application-level backup, and
